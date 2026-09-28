@@ -21,7 +21,7 @@ function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
 
 function rngFactory(seed){
   var s = (seed>>>0) || 1;
-  return function(){
+  return () => {
     s = (s + 0x9e3779b9)>>>0;
     var t = s;
     t ^= t>>>16; t = Math.imul(t, 0x21f0aaad)>>>0;
@@ -215,7 +215,7 @@ function setSail(g){
 <script>
 /* ---- render + input layer ---- */
 var cv = document.getElementById('cv');
-window.addEventListener('error', function(e){
+window.addEventListener('error', (e) => {
   var d = document.getElementById('err');
   if(d) d.textContent = 'JSERR: ' + e.message + ' @' + e.lineno;
 });
@@ -438,27 +438,27 @@ function step(t){
   requestAnimationFrame(step);
 }
 
-window.addEventListener('keydown', function(e){
+window.addEventListener('keydown', (e) => {
   KEYS[e.key]=true;
   if(e.key===' '){ e.preventDefault(); if(g.scene==='drift') tryDock(g); }
   if(e.key==='r'||e.key==='R'){ repairRaft(g); }
   if(e.key==='e'||e.key==='E'){ setSail(g); }
   if(e.key==='Enter'&&g.ended){ g=newGame((Date.now()&0xffff)); }
 });
-window.addEventListener('keyup', function(e){ KEYS[e.key]=false; });
+window.addEventListener('keyup', (e) => { KEYS[e.key]=false; });
 
 // test hooks
 window.__game = {
-  state: function(){ return g; },
-  reset: function(seed){ g=newGame(seed===undefined?999:seed); return g; },
-  tick: function(dt){ return tickDrift(g, dt); },
-  dock: function(){ return tryDock(g); },
-  sail: function(){ return setSail(g); },
-  repair: function(){ return repairRaft(g); },
-  gather: function(){ return gatherAt(g); },
-  moveTo: function(x,y){ g.player.x=x; g.player.y=y; g.player.tx=x; g.player.ty=y; return gatherAt(g); },
-  nextKind: function(){ return nextKind(g); },
-  scene: function(){ return g.scene; }
+  state: () => g,
+  reset: (seed) => { g = newGame(seed===undefined?999:seed); return g; },
+  tick: (dt) => tickDrift(g, dt),
+  dock: () => tryDock(g),
+  sail: () => setSail(g),
+  repair: () => repairRaft(g),
+  gather: () => gatherAt(g),
+  moveTo: (x,y) => { g.player.x=x; g.player.y=y; g.player.tx=x; g.player.ty=y; return gatherAt(g); },
+  nextKind: () => nextKind(g),
+  scene: () => g.scene
 };
 
 requestAnimationFrame(step);
