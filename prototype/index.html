@@ -13,7 +13,7 @@
 </head>
 <body>
 <div id="wrap"><canvas id="cv" width="360" height="640"></canvas></div>
-<div id="hint">chart: tap a destination &nbsp;·&nbsp; sea: drag to steer &nbsp;·&nbsp; rifts break the raft</div>
+<div id="hint">chart: tap a destination &nbsp;·&nbsp; sea: drag to steer &nbsp;·&nbsp; island: tap to walk, then SET SAIL</div>
 <div id="err" style="position:fixed;top:0;left:0;color:#f66;font-size:12px;z-index:9"></div>
 <script id="core">
 /* ---- pure core: extractable, DOM-free ---- */
@@ -22,6 +22,9 @@ var BASE_SPEED = 25;      // units per second
 var DR_FOOD = 2.6, DR_WATER = 2.0;   // supply drain per second at sea
 var RIFT_DMG = 14, RIFT_COST = 5;
 var LAND_RANGE = 170;     // how close you can be and still tap to land
+var RIFT_KEEPOUT = 140;   // no rift in the landing approach
+var RIFT_HIT = 0.30;      // share this much of the rift's lane and it bites
+var ISLE_W = 360, ISLE_H = 640;
 
 function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
 
@@ -69,6 +72,7 @@ function newGame(seed){
     heading:0, steer:0, dragging:false,
     time:0,
     rifts:[],
+    island:null,
     hitFlash:0,
     msg:'pick a heading',
     ended:false, won:false
@@ -83,13 +87,16 @@ function aliveTargets(g){
 }
 
 /* spread a small, fixed handful of rifts across the leg, so they
-   arrive DURING the voyage and before the island does */
+   arrive DURING the voyage and before the island does. The last
+   stretch before land stays clear (RIFT_KEEPOUT), so a rift can
+   never park itself in your landing approach. */
 function planRifts(g, legDist){
   g.rifts = [];
-  var n = clamp(Math.round(legDist/380), 2, 3);
+  var span = legDist - RIFT_KEEPOUT;
+  if(span < 100) return g;           // short hop: no crossing
+  var n = clamp(Math.round(span/300), 1, 3);
   for(var i=0;i<n;i++){
-    var f = (i+1)/(n+1);
-    var d = Math.min(legDist*f + 55, DMAX*0.9);
+    var d = span * (i+1)/(n+1);      // strictly inside the span, so gap >= keepout
     g.rifts.push({ lane:(g.rnd()*2-1)*0.9, d:d, age:0 });
   }
   return g;
@@ -108,11 +115,28 @@ function chooseTarget(g, i){
   return g;
 }
 
+/* tap when you are close. No lane gate anymore: lining up forced the
+   player to crab sideways, which fought the whole point of tapping. */
 function canLand(g){
   if(g.scene!=='sail') return false;
   var t = g.targets[g.target];
   if(!t) return false;
-  return t.dist <= LAND_RANGE && t.dist > -6 && Math.abs(t.lane - g.heading) < 0.30;
+  return t.dist <= LAND_RANGE && t.dist > -6;
+}
+
+/* the island is a place now, not a button that refills you */
+function makeIsland(g, t){
+  var r = rngFactory((t.seed>>>0) ^ 0x51ed);
+  var n = t.big ? 5 : 4 + (r()<0.5?0:1);
+  var kinds = ['food','water','food','water','mat','plank'];
+  var nodes = [];
+  for(var i=0;i<n;i++){
+    var a = i/n*Math.PI*2 + r()*0.5;
+    var rad = 78 + r()*66;
+    nodes.push({ x:ISLE_W*0.5 + Math.cos(a)*rad, y:ISLE_H*0.46 + Math.sin(a)*rad*0.78, kind:kinds[i%kinds.length], taken:false });
+  }
+  g.island = { nodes:nodes, px:ISLE_W*0.5, py:ISLE_H*0.62, tx:ISLE_W*0.5, ty:ISLE_H*0.62 };
+  return g;
 }
 
 function doLandfall(g){
@@ -126,10 +150,41 @@ function doLandfall(g){
     g.msg='you reached the big land';
     return g;
   }
-  g.food  = Math.min(140, g.food + 46);
-  g.water = Math.min(140, g.water + 46);
-  g.materials += 2;
-  g.msg = 'landfall at ' + t.name + '. restocked.';
+  makeIsland(g, t);
+  g.scene = 'island';
+  g.msg = 'ashore at ' + t.name + '. tap to walk, step on what you need.';
+  return g;
+}
+
+var ISLE_SPEED = 78;
+function tickIsland(g, dt){
+  if(g.scene!=='island') return g;
+  var is = g.island;
+  if(!is) return g;
+  g.time += dt;
+  var dx = is.tx - is.px, dy = is.ty - is.py;
+  var d = Math.sqrt(dx*dx + dy*dy);
+  if(d > 1.5){
+    var st = Math.min(d, ISLE_SPEED*dt);
+    is.px += dx/d*st; is.py += dy/d*st;
+  }
+  for(var i=0;i<is.nodes.length;i++){
+    var nd = is.nodes[i];
+    if(nd.taken) continue;
+    var ndx = nd.x - is.px, ndy = nd.y - is.py;
+    if(Math.sqrt(ndx*ndx + ndy*ndy) < 17){
+      nd.taken = true;
+      if(nd.kind==='food'){ g.food = Math.min(160, g.food+30); g.msg='berries. food +30'; }
+      else if(nd.kind==='water'){ g.water = Math.min(160, g.water+30); g.msg='fresh water. +30'; }
+      else if(nd.kind==='mat'){ g.materials += 2; g.msg='timber. materials +2'; }
+      else if(nd.kind==='plank'){ g.integrity = clamp(g.integrity+18,0,100); g.msg='spare planks. raft +18'; }
+    }
+  }
+  return g;
+}
+
+function leaveIsland(g){
+  if(g.scene!=='island') return g;
   return backToChart(g);
 }
 
@@ -137,6 +192,7 @@ function backToChart(g){
   g.scene='chart';
   g.target=-1;
   g.rifts=[];
+  g.island=null;
   return g;
 }
 
@@ -162,9 +218,9 @@ function tickSail(g, dt){
   for(var i=g.rifts.length-1;i>=0;i--){
     var rf=g.rifts[i];
     rf.age = (rf.age||0) + dt;
-    rf.d -= (BASE_SPEED+4)*dt;
-    if(rf.d < -40){ g.rifts.splice(i,1); continue; }
-    if(rf.d < 10 && rf.d > -2 && Math.abs(rf.lane - g.heading) < 0.16){
+    rf.d -= (BASE_SPEED+7)*dt;
+    if(rf.d < -8){ g.rifts.splice(i,1); continue; }
+    if(rf.d < 12 && rf.d > -2 && Math.abs(rf.lane - g.heading) < RIFT_HIT){
       g.integrity = clamp(g.integrity - RIFT_DMG, 0, 100);
       g.food = Math.max(0, g.food - RIFT_COST*0.5);
       g.water = Math.max(0, g.water - RIFT_COST*0.5);
@@ -176,16 +232,9 @@ function tickSail(g, dt){
   }
   if(g.hitFlash>0) g.hitFlash = Math.max(0, g.hitFlash-dt);
 
-  // arrival: tapped landfall is the real path; this is only the
-  // safety net so a lined-up raft does not sail straight through
-  if(t.dist <= 8){
-    if(Math.abs(t.lane - g.heading) < 0.30) return doLandfall(g);
-    if(t.dist <= -6){
-      g.scene='over'; g.ended=true;
-      g.msg = 'you missed ' + t.name + ' and drifted on';
-      return g;
-    }
-  }
+  // arrival: tapping is the real path; this is only the safety net
+  // so a raft cannot sail straight past the island it aimed at.
+  if(t.dist <= 8) return doLandfall(g);
   return g;
 }
 
@@ -211,7 +260,10 @@ var last = 0;
 
 function px(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(x|0,y|0,w|0,h|0); }
 
-function tOf(d){ return clamp(1 - d/DMAX, 0, 1); }
+/* no upper clamp: a rift that has passed the raft (d<0) keeps
+   moving past instead of freezing at the horizon projection and
+   'drifting along' until it is culled. */
+function tOf(d){ return Math.max(0, 1 - d/DMAX); }
 function projScale(d){ return 0.20 + 1.55*Math.pow(tOf(d), 1.7); }
 function projX(lane, d){ var k = 26 + 320*Math.pow(tOf(d), 1.5); return W/2 + (lane - g.heading)*k; }
 function projY(d){ return HY + (H*0.70 - HY)*Math.pow(tOf(d), 1.5); }
@@ -364,11 +416,10 @@ function drawSail(){
   drawTargetIsland(); drawRifts(); drawRaft(); drawTail();
   var t = g.targets[g.target];
   if(t && t.dist <= LAND_RANGE){
-    var inLane = Math.abs(t.lane - g.heading) < 0.30;
-    ctx.fillStyle = inLane ? 'rgba(255,211,77,'+(0.55+0.4*Math.sin(g.time*6))+')' : '#eaf4ff';
+    ctx.fillStyle = 'rgba(255,211,77,'+(0.55+0.4*Math.sin(g.time*6))+')';
     ctx.font='12px ui-monospace,monospace';
-    ctx.globalAlpha = 0.55; px(W/2-56, HY-26, 112, 18, '#04223a'); ctx.globalAlpha = 1;
-    ctx.fillText(inLane?'TAP TO MAKE LANDFALL':'LINE UP WITH HER', W/2-52, HY-14);
+    ctx.globalAlpha = 0.55; px(W/2-62, HY-26, 124, 18, '#04223a'); ctx.globalAlpha = 1;
+    ctx.fillText('TAP TO MAKE LANDFALL', W/2-58, HY-14);
   }
   if(g.hitFlash>0){ ctx.globalAlpha=g.hitFlash/0.35*0.5; px(0,0,W,H,'#e0705a'); ctx.globalAlpha=1; }
   drawHUD();
@@ -429,9 +480,56 @@ function drawOver(){
   ctext('tap or press ENTER to sail again', H*0.62, '#cfe4f2');
 }
 
+var SAIL_BTN = { x:W/2-56, y:H-52, w:112, h:28 };
+function isleNodeCol(kind){
+  if(kind==='food') return '#6fcf6f';
+  if(kind==='water') return '#5fa8ff';
+  if(kind==='mat') return '#c98b4b';
+  return '#e0d3a6';
+}
+function drawIslandScene(){
+  px(0,0,W,H,'#2a84ac');
+  for(var y=0;y<H;y+=20) px(0,y,W,1,'#3d9bc4');
+  ctx.fillStyle='#e6d3a3';
+  ctx.beginPath(); ctx.arc(W/2, H*0.44, 140, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle='#3f8a68';
+  ctx.beginPath(); ctx.arc(W/2, H*0.43, 122, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle='#357d5e';
+  ctx.beginPath(); ctx.arc(W/2-26, H*0.38, 60, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle='#2f7154';
+  ctx.beginPath(); ctx.arc(W/2+34, H*0.50, 40, 0, Math.PI*2); ctx.fill();
+  var is = g.island;
+  if(is){
+    for(var i=0;i<is.nodes.length;i++){
+      var nd=is.nodes[i];
+      if(nd.taken) ctx.globalAlpha=0.25;
+      px(nd.x-7, nd.y-7, 14, 14, '#04223a');
+      px(nd.x-5, nd.y-5, 10, 10, isleNodeCol(nd.kind));
+      px(nd.x-1, nd.y-8, 2, 16, '#04223a');
+      ctx.globalAlpha=1;
+    }
+    px(is.px-5, is.py-13, 10, 10, '#eef1fa');
+    px(is.px-6, is.py-3, 12, 12, '#e0705a');
+    px(is.px-3, is.py-15, 6, 4, '#3a3f52');
+  }
+  px(SAIL_BTN.x, SAIL_BTN.y, SAIL_BTN.w, SAIL_BTN.h, '#04223a');
+  px(SAIL_BTN.x+2, SAIL_BTN.y+2, SAIL_BTN.w-4, SAIL_BTN.h-4, '#2a6d90');
+  ctext('SET SAIL', SAIL_BTN.y+19, '#eef4ff','12px ui-monospace,monospace');
+  ctx.globalAlpha = 0.42; px(6,8,182,92,'#04223a'); ctx.globalAlpha = 1;
+  bar(12,20,110,g.food/140,'#6fcf6f','FOOD '+Math.round(g.food));
+  bar(12,40,110,g.water/140,'#5fa8ff','WATER '+Math.round(g.water));
+  bar(12,60,110,g.integrity/100,'#e0705a','RAFT '+Math.round(g.integrity));
+  ctx.fillStyle='#ffffff'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText('LEGS '+g.legs+(g.materials?('   MAT '+g.materials):''), 12, 84);
+  ctx.globalAlpha = 0.42; px(6,H-70,W-12,16,'#04223a'); ctx.globalAlpha = 1;
+  ctx.fillStyle='#eaf4ff'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText(g.msg, 12, H-58);
+}
+
 function render(){
   if(g.scene==='chart') drawChart();
   else if(g.scene==='sail') drawSail();
+  else if(g.scene==='island') drawIslandScene();
   else drawOver();
 }
 
@@ -440,6 +538,7 @@ function step(t){
   var dt = Math.min(0.05, (t-last)/1000);
   last=t;
   tickChart(g, dt);
+  tickIsland(g, dt);
   tickSail(g, dt);
   render();
   requestAnimationFrame(step);
@@ -486,10 +585,16 @@ function onUp(e){
   if(g.ended){ g = newGame((Date.now()&0xffff)); return; }
   if(moved > 16) return;
   if(g.scene==='chart'){ pickChart(p); return; }
+  if(g.scene==='island'){
+    if(hit(p, SAIL_BTN)){ leaveIsland(g); return; }
+    var is=g.island;
+    if(is){ is.tx=clamp(p.x, 30, W-30); is.ty=clamp(p.y, H*0.20, H*0.62); }
+    return;
+  }
   if(g.scene==='sail'){
     if(canLand(g)){ doLandfall(g); return; }
     var t=g.targets[g.target];
-    if(t && t.dist<=LAND_RANGE) g.msg = Math.abs(t.lane-g.heading)<0.30 ? 'tap to go ashore' : 'line her up with the island';
+    if(t && t.dist<=LAND_RANGE) g.msg = 'tap to go ashore';
     return;
   }
 }
@@ -527,6 +632,10 @@ window.__game = {
   planRifts: (d) => planRifts(g, d),
   canLand: () => canLand(g),
   land: () => doLandfall(g),
+  island: () => g.island,
+  tickIsland: (dt) => { tickIsland(g, dt); return g; },
+  leaveIsland: () => leaveIsland(g),
+  walk: (x,y) => { if(g.island){ g.island.tx=x; g.island.ty=y; } return g.island; },
   integrity: () => g.integrity,
   chartPos: (l,d) => chartPos(l,d),
   pickChart: (x,y) => pickChart({x:x,y:y})
