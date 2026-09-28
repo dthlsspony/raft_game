@@ -21,6 +21,7 @@ var DMAX = 1000;          // world units from horizon to the raft
 var BASE_SPEED = 25;      // units per second
 var DR_FOOD = 2.6, DR_WATER = 2.0;   // supply drain per second at sea
 var RIFT_DMG = 14, RIFT_COST = 5;
+var LAND_RANGE = 170;     // how close you can be and still tap to land
 
 function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
 
@@ -67,7 +68,7 @@ function newGame(seed){
     target:-1,
     heading:0, steer:0, dragging:false,
     time:0,
-    rifts:[], riftAt:1.0,
+    rifts:[],
     hitFlash:0,
     msg:'pick a heading',
     ended:false, won:false
@@ -81,6 +82,19 @@ function aliveTargets(g){
   return out;
 }
 
+/* spread a small, fixed handful of rifts across the leg, so they
+   arrive DURING the voyage and before the island does */
+function planRifts(g, legDist){
+  g.rifts = [];
+  var n = clamp(Math.round(legDist/380), 2, 3);
+  for(var i=0;i<n;i++){
+    var f = (i+1)/(n+1);
+    var d = Math.min(legDist*f + 55, DMAX*0.9);
+    g.rifts.push({ lane:(g.rnd()*2-1)*0.9, d:d, age:0 });
+  }
+  return g;
+}
+
 function chooseTarget(g, i){
   if(g.scene!=='chart') return g;
   var t = g.targets[i];
@@ -89,10 +103,34 @@ function chooseTarget(g, i){
   g.heading = t.lane;
   g.scene = 'sail';
   g.time = 0;
-  g.riftAt = 0.8;
-  g.rifts = [];
+  planRifts(g, t.dist);
   g.msg = 'heading for ' + t.name;
   return g;
+}
+
+function canLand(g){
+  if(g.scene!=='sail') return false;
+  var t = g.targets[g.target];
+  if(!t) return false;
+  return t.dist <= LAND_RANGE && t.dist > -6 && Math.abs(t.lane - g.heading) < 0.30;
+}
+
+function doLandfall(g){
+  if(g.scene!=='sail') return g;
+  var t = g.targets[g.target];
+  if(!t){ g.scene='chart'; return g; }
+  t.done = true;
+  g.legs++;
+  if(t.big){
+    g.scene='win'; g.won=true; g.ended=true;
+    g.msg='you reached the big land';
+    return g;
+  }
+  g.food  = Math.min(140, g.food + 46);
+  g.water = Math.min(140, g.water + 46);
+  g.materials += 2;
+  g.msg = 'landfall at ' + t.name + '. restocked.';
+  return backToChart(g);
 }
 
 function backToChart(g){
@@ -100,12 +138,6 @@ function backToChart(g){
   g.target=-1;
   g.rifts=[];
   return g;
-}
-
-function spawnRift(g){
-  var r = g.rnd();
-  var lane = (r*2-1)*0.95;
-  g.rifts.push({ lane:lane, d:DMAX + 40 + g.rnd()*80 });
 }
 
 function tickSail(g, dt){
@@ -127,9 +159,9 @@ function tickSail(g, dt){
 
   // rifts approach; hitting one costs the raft
   g.time += dt;
-  if(g.time >= g.riftAt){ spawnRift(g); g.riftAt = 0.75 + g.rnd()*0.9; }
   for(var i=g.rifts.length-1;i>=0;i--){
     var rf=g.rifts[i];
+    rf.age = (rf.age||0) + dt;
     rf.d -= (BASE_SPEED+4)*dt;
     if(rf.d < -40){ g.rifts.splice(i,1); continue; }
     if(rf.d < 10 && rf.d > -2 && Math.abs(rf.lane - g.heading) < 0.16){
@@ -144,22 +176,10 @@ function tickSail(g, dt){
   }
   if(g.hitFlash>0) g.hitFlash = Math.max(0, g.hitFlash-dt);
 
-  // arrival
+  // arrival: tapped landfall is the real path; this is only the
+  // safety net so a lined-up raft does not sail straight through
   if(t.dist <= 8){
-    if(Math.abs(t.lane - g.heading) < 0.30){
-      t.done = true;
-      g.legs++;
-      if(t.big){
-        g.scene='win'; g.won=true; g.ended=true;
-        g.msg='you reached the big land';
-        return g;
-      }
-      g.food  = Math.min(140, g.food + 46);
-      g.water = Math.min(140, g.water + 46);
-      g.materials += 2;
-      g.msg = 'landfall at ' + t.name + '. restocked.';
-      return backToChart(g);
-    }
+    if(Math.abs(t.lane - g.heading) < 0.30) return doLandfall(g);
     if(t.dist <= -6){
       g.scene='over'; g.ended=true;
       g.msg = 'you missed ' + t.name + ' and drifted on';
@@ -258,7 +278,7 @@ function drawRifts(){
     var s = projScale(rf.d);
     if(y < HY+2 || x < -80 || x > W+80) continue;
     var w = 34*s + 6, h = 16*s + 3;
-    ctx.globalAlpha = 0.9;
+    ctx.globalAlpha = 0.9 * clamp((rf.age||0)/0.5, 0, 1);
     ctx.fillStyle='#26424f';
     ctx.beginPath();
     ctx.moveTo(x-w/2, y); ctx.lineTo(x-w*0.25, y-h*0.6);
@@ -341,9 +361,9 @@ function drawHUD(){
 }
 function drawSail(){
   drawSky(); drawSea(); drawWake();
-  drawRifts(); drawTargetIsland(); drawRaft(); drawTail();
+  drawTargetIsland(); drawRifts(); drawRaft(); drawTail();
   var t = g.targets[g.target];
-  if(t && t.dist <= 90){
+  if(t && t.dist <= LAND_RANGE){
     var inLane = Math.abs(t.lane - g.heading) < 0.30;
     ctx.fillStyle = inLane ? 'rgba(255,211,77,'+(0.55+0.4*Math.sin(g.time*6))+')' : '#eaf4ff';
     ctx.font='12px ui-monospace,monospace';
@@ -464,11 +484,13 @@ function onUp(e){
   var p = dragStart; var moved = dragMoved;
   dragStart = null; g.dragging = false; g.steer = 0;
   if(g.ended){ g = newGame((Date.now()&0xffff)); return; }
-  if(moved > 10) return;
+  if(moved > 16) return;
   if(g.scene==='chart'){ pickChart(p); return; }
   if(g.scene==='sail'){
+    if(canLand(g)){ doLandfall(g); return; }
     var t=g.targets[g.target];
-    if(t && t.dist<=90 && Math.abs(t.lane-g.heading)<0.30) g.msg='hold her steady';
+    if(t && t.dist<=LAND_RANGE) g.msg = Math.abs(t.lane-g.heading)<0.30 ? 'tap to go ashore' : 'line her up with the island';
+    return;
   }
 }
 function hit(p, b){ return p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h; }
@@ -502,6 +524,9 @@ window.__game = {
   steer: (v) => { g.steer = v; return g; },
   heading: () => g.heading,
   rifts: () => g.rifts,
+  planRifts: (d) => planRifts(g, d),
+  canLand: () => canLand(g),
+  land: () => doLandfall(g),
   integrity: () => g.integrity,
   chartPos: (l,d) => chartPos(l,d),
   pickChart: (x,y) => pickChart({x:x,y:y})
