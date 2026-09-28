@@ -2,21 +2,24 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Raft slice</title>
 <style>
-  html,body{margin:0;height:100%;background:#05070d;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace}
+  html,body{margin:0;height:100%;background:#05070d;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace;touch-action:none;-webkit-user-select:none;user-select:none}
   #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
-  canvas{image-rendering:pixelated;background:#05070d;box-shadow:0 0 0 2px #1b2338,0 20px 60px #000a;max-width:100vw;max-height:100vh}
-  #hint{position:fixed;left:0;right:0;bottom:8px;text-align:center;color:#8fa0c8;font-size:12px;letter-spacing:.5px;pointer-events:none}
+  canvas{image-rendering:pixelated;background:#05070d;box-shadow:0 0 0 2px #1b2338,0 20px 60px #000a;max-width:100vw;max-height:100vh;touch-action:none}
+  #hint{position:fixed;left:0;right:0;bottom:4px;text-align:center;color:#8fa0c8;font-size:11px;letter-spacing:.5px;pointer-events:none}
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="cv" width="640" height="360"></canvas></div>
-<div id="hint">arrows / wasd &nbsp;·&nbsp; space = dock &nbsp;·&nbsp; let it pass = drift on &nbsp;·&nbsp; R = repair &nbsp;·&nbsp; E = set sail</div>
+<div id="hint">drag = steer &nbsp;·&nbsp; tap = land / walk &nbsp;·&nbsp; e = set sail</div>
 <div id="err" style="position:fixed;top:0;left:0;color:#f66;font-size:12px;z-index:9"></div>
 <script id="core">
 /* ---- pure-ish game core: extractable, DOM-free ---- */
+var DMAX = 110;          // world units from horizon to the raft
+var BASE_SPEED = 18;     // units per second the world closes in
+
 function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
 
 function rngFactory(seed){
@@ -40,9 +43,9 @@ function newGame(seed){
     dockings: 0, passed: 0,
     fleet: 0,
     maxIslands: 3,
-    scrollX: 0,
-    driftTime: 0,
-    islandAt: 4.0,
+    heading: 0, steer: 0, dragging: false,
+    driftTime: 0, islandAt: 2.4,
+    islands: [],
     island: null,
     grid: null, player: null, pickups: null, islandKind: 'small',
     powerups: 0, speedBonus: 0,
@@ -86,51 +89,83 @@ function tickFleet(g, dt){
   return g;
 }
 
+function spawnIsland(g){
+  var kind = nextKind(g);
+  var lane;
+  if(kind === 'big'){ lane = 0; }
+  else { lane = (g.rnd()*2-1) * 0.85; }
+  g.islands.push({ d: DMAX, lane: lane, kind: kind, seed: Math.floor(g.rnd()*1e9) });
+  if(kind !== 'big' && g.rnd() < 0.4){
+    // sometimes a second option on the horizon
+    g.islands.push({ d: DMAX + 26, lane: -(lane>=0?1:-1) * (0.35 + g.rnd()*0.5), kind: 'small', seed: Math.floor(g.rnd()*1e9) });
+  }
+}
+
+function dockableIndex(g){
+  for(var i=0;i<g.islands.length;i++){
+    var is = g.islands[i];
+    if(is.d <= 17 && Math.abs(is.lane - g.heading) < 0.34) return i;
+  }
+  return -1;
+}
+
 function tickDrift(g, dt){
   if(g.scene!=='drift' || g.ended) return g;
-  var speed = 90 + g.speedBonus;
-  g.scrollX += speed*dt;
+
+  // steering
+  var prevHeading = g.heading;
+  if(g.steer){ g.heading = clamp(g.heading + g.steer * 1.15 * dt, -1, 1); }
+  else if(!g.dragging){ g.heading = g.heading * Math.max(0, 1 - 0.9*dt); }
+
+  var speed = BASE_SPEED + g.speedBonus * 0.5;
   g.food = Math.max(0, g.food - 2.6*dt);
   g.water = Math.max(0, g.water - 2.0*dt);
   if(g.food<=0 || g.water<=0){
     g.scene='over'; g.ended=true; g.msg='out of supplies on the open sea';
     return g;
   }
+  if(g.heading !== prevHeading && dockableIndex(g) < 0) g.msg = 'steering';
+
   g.driftTime += dt;
-  if(!g.island && g.driftTime >= g.islandAt){
-    g.island = { x: 760, kind: nextKind(g), seed: Math.floor(g.rnd()*1e9) };
+  if(g.driftTime >= g.islandAt && g.islands.length < 3){
+    spawnIsland(g);
+    g.driftTime = 0;
+    g.islandAt = 3.6 + g.rnd()*2.4;
   }
-  if(g.island){
-    g.island.x -= speed*dt;
-    if(g.island.x <= -70){
-      var kind = g.island.kind;
-      g.island = null;
-      g.driftTime = 0;
-      g.islandAt = 3.5 + g.rnd()*2.5;
-      g.food = Math.max(0, g.food - 6);
-      g.water = Math.max(0, g.water - 5);
-      if(kind==='big'){
+
+  for(var i=g.islands.length-1; i>=0; i--){
+    var is = g.islands[i];
+    is.d -= speed*dt;
+    if(is.d <= -6){
+      g.islands.splice(i,1);
+      if(is.kind === 'big'){
         g.scene='over'; g.ended=true; g.msg='you drifted straight past the big land';
         return g;
       }
       g.passed++;
-      g.msg = 'drifted on, another leg costs supplies';
-      wearLeg(g, 6);
+      g.food = Math.max(0, g.food - 6);
+      g.water = Math.max(0, g.water - 5);
+      g.msg = 'drifted past, another leg costs supplies';
+      wearLeg(g, 5);
+      if(g.ended) return g;
     }
   }
   return g;
 }
 
-function tryDock(g){
-  if(g.scene!=='drift' || !g.island) return g;
-  if(g.island.x > 230) { g.msg = 'too far to reach the shore yet'; return g; }
-  g.islandKind = g.island.kind;
-  g.grid = generateIsland(g.island.kind, g.island.seed);
+function tryDock(g, idx){
+  if(g.scene!=='drift') return g;
+  if(idx === undefined) idx = dockableIndex(g);
+  if(idx < 0){ g.msg = 'nothing in reach to land on'; return g; }
+  var is = g.islands[idx];
+  g.islandKind = is.kind;
+  g.grid = generateIsland(is.kind, is.seed);
   g.pickups = placePickups(g.grid, g.islandKind, g.rnd);
-  g.player = { x: g.grid.spawn.x, y: g.grid.spawn.y, tx: g.grid.spawn.x, ty: g.grid.spawn.y };
+  g.player = { x: g.grid.spawn.x, y: g.grid.spawn.y, goal: null };
   g.scene='island';
+  g.islands = [];
+  g.heading = 0;
   g.msg = g.islandKind==='big' ? 'the big land. gather what you can.' : 'go ashore';
-  g.island = null;
   return g;
 }
 
@@ -150,9 +185,7 @@ function generateIsland(kind, seed){
     }
     map.push(row);
   }
-  // guarantee a shore tile near centre
   if(!map[Math.floor(cy)][Math.floor(cx)]) map[Math.floor(cy)][Math.floor(cx)]=1;
-  // spawn on the lowest land tile near centre column
   var spawn={x:Math.floor(cx), y:Math.floor(cy)};
   for(var yy=h-1; yy>=0; yy--){
     if(map[yy][Math.floor(cx)]){ spawn={x:Math.floor(cx), y:yy}; break; }
@@ -184,9 +217,10 @@ function placePickups(grid, kind, rnd){
 
 function gatherAt(g){
   if(g.scene!=='island') return g;
+  var tx = Math.round(g.player.x), ty = Math.round(g.player.y);
   for(var i=0;i<g.pickups.length;i++){
     var p=g.pickups[i];
-    if(!p.taken && p.x===g.player.tx && p.y===g.player.ty){
+    if(!p.taken && p.x===tx && p.y===ty){
       p.taken=true;
       if(p.k==='food'){ g.food = Math.min(140, g.food+9); g.msg='+food'; }
       else if(p.k==='water'){ g.water = Math.min(140, g.water+9); g.msg='+water'; }
@@ -194,6 +228,28 @@ function gatherAt(g){
       else { g.materials += (p.k==='wood'?2:1); g.msg='+materials'; }
     }
   }
+  return g;
+}
+
+function walkable(g, x, y){
+  var ty = Math.round(y), tx = Math.round(x);
+  if(ty<0 || ty>=g.grid.h || tx<0 || tx>=g.grid.w) return false;
+  return g.grid.map[ty][tx]===1;
+}
+
+function stepPlayer(g, dt){
+  if(g.scene!=='island' || !g.player || !g.player.goal) return g;
+  var p=g.player, gl=p.goal;
+  var dx=gl.x-p.x, dy=gl.y-p.y;
+  var dist=Math.sqrt(dx*dx+dy*dy);
+  if(dist < 0.08){ p.x=gl.x; p.y=gl.y; p.goal=null; gatherAt(g); return g; }
+  var step = Math.min(5.2*dt, dist);
+  var nx = p.x + dx/dist*step, ny = p.y + dy/dist*step;
+  var moved = false;
+  if(walkable(g, nx, p.y)){ p.x=nx; moved=true; } else { gl.x = Math.round(p.x); }
+  if(walkable(g, p.x, ny)){ p.y=ny; moved=true; } else { gl.y = Math.round(p.y); }
+  if(!moved) p.goal = null;
+  gatherAt(g);
   return g;
 }
 
@@ -218,14 +274,15 @@ function setSail(g){
   if(g.ended) return g;
   g.scene='drift';
   g.driftTime = 0;
-  g.islandAt = 3.5 + g.rnd()*2.5;
-  g.scrollX = 0;
+  g.islandAt = 2.6 + g.rnd()*2.2;
+  g.islands = [];
+  g.heading = 0;
   wearLeg(g, 4);
   return g;
 }
 </script>
 <script>
-/* ---- render + input layer ---- */
+/* ---- render + input layer (behind-the-raft view, touch first) ---- */
 var cv = document.getElementById('cv');
 window.addEventListener('error', (e) => {
   var d = document.getElementById('err');
@@ -234,94 +291,152 @@ window.addEventListener('error', (e) => {
 var ctx = cv.getContext('2d');
 ctx.imageSmoothingEnabled = false;
 var W = cv.width, H = cv.height;
+var HY = H*0.42;              // horizon line
 var KEYS = {};
 var g = newGame(12345);
 var last = 0;
 
 function px(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(x|0,y|0,w|0,h|0); }
+function lin(a,b,stop,co){ stop.addColorStop(a,b); return co; }
+
+/* --- projection from world (lane, distance) to screen --- */
+function tOf(d){ return clamp(1 - d/DMAX, 0, 1); }
+function projScale(d){ return 0.20 + 1.55*Math.pow(tOf(d), 1.7); }
+function projX(lane, d){ var k = 26 + 320*Math.pow(tOf(d), 1.5); return W/2 + (lane - g.heading)*k; }
+function projY(d){ return HY + (H*0.70 - HY)*Math.pow(tOf(d), 1.5); }
 
 function drawSky(){
-  var grd = ctx.createLinearGradient(0,0,0,H*0.62);
-  grd.addColorStop(0,'#0a1024');
-  grd.addColorStop(0.6,'#1b1a3a');
+  var grd = ctx.createLinearGradient(0,0,0,HY);
+  grd.addColorStop(0,'#080e20');
+  grd.addColorStop(0.55,'#191a38');
   grd.addColorStop(1,'#4a3350');
-  ctx.fillStyle=grd; ctx.fillRect(0,0,W,H*0.62);
-  // a low sun smudge
-  px(W*0.62, H*0.44, 60, 6, '#7a4a6a');
-  px(W*0.63, H*0.47, 40, 3, '#a06a86');
+  ctx.fillStyle=grd; ctx.fillRect(0,0,W,HY);
+  px(W*0.60, HY-46, 70, 7, '#7a4a6a');
+  px(W*0.61, HY-40, 46, 4, '#a06a86');
 }
 
 function drawSea(){
-  var hor = H*0.60;
-  var bands = ['#0c1730','#102242','#0d1c38','#12284a','#0a1528'];
-  for(var i=0;i<9;i++){
-    var y = hor + i*((H-hor)/9);
-    var off = (g.scrollX*0.5 + i*13) % 80;
-    px(0, y, W, (H-hor)/9, bands[i%bands.length]);
-    // little wave ticks
-    for(var x=-80; x<W+80; x+=80){
-      px(x - off + (i%2)*30, y+3, 14, 2, '#1d3a63');
+  var bands = ['#0b1630','#0f2242','#0c1b38','#122a4c','#0a1528'];
+  var n = 10;
+  for(var i=0;i<n;i++){
+    var y0 = HY + i*((H-HY)/n);
+    var t = i/n;
+    var off = (g.driftTime*40*(0.3+t)) % 90;
+    px(0, y0, W, (H-HY)/n+1, bands[i%bands.length]);
+    for(var x=-140; x<W+140; x+=90){
+      px(x - off + (i%2)*40, y0+3, 8+t*22, 2, '#1d3a63');
     }
   }
-}
-
-function drawFog(){
-  var hor = H*0.60;
-  var grd = ctx.createLinearGradient(0,hor-40,0,hor+90);
-  grd.addColorStop(0,'rgba(150,170,210,0.0)');
-  grd.addColorStop(0.45,'rgba(150,170,210,0.28)');
-  grd.addColorStop(1,'rgba(150,170,210,0.0)');
-  ctx.fillStyle=grd; ctx.fillRect(0,hor-40,W,130);
-  for(var i=0;i<5;i++){
-    var fx = (W - ((g.scrollX*0.15 + i*180)%(W+300))) ;
-    var a = 0.05 + (i%3)*0.02;
-    ctx.fillStyle='rgba(190,205,235,'+a+')';
-    ctx.fillRect(fx, hor-16 + (i%2)*10, 220, 26);
+  // converging lines give the depth read
+  for(var k=-3;k<=3;k++){
+    px(W/2 + k*22, HY, 2, H-HY, '#0d2240');
   }
 }
 
-function drawIsland(){
-  if(!g.island) return;
-  var hor = H*0.60;
-  var x = g.island.x;
-  var t = clamp(1 - (x-90)/(W-90), 0.15, 1); // 1 = right next to raft
-  var baseW = g.island.kind==='big' ? 300 : 190;
-  var baseH = g.island.kind==='big' ? 90 : 54;
-  var w = baseW*(0.35+0.65*t);
-  var h = baseH*(0.35+0.65*t);
-  var col = '#05070f';
-  // silhouette: a couple of peaks + trunk
-  ctx.fillStyle=col;
+function drawWake(){
+  var baseY = H*0.995;
+  var topY = H*0.80;
+  ctx.globalAlpha = 0.5;
   ctx.beginPath();
-  ctx.moveTo(x-w/2, hor+6);
-  ctx.lineTo(x-w*0.30, hor+6-h*0.55);
-  ctx.lineTo(x-w*0.12, hor+6-h);
-  ctx.lineTo(x+w*0.06, hor+6-h*0.6);
-  ctx.lineTo(x+w*0.26, hor+6-h*0.82);
-  ctx.lineTo(x+w/2, hor+6);
-  ctx.closePath();
-  ctx.fill();
-  px(x-w/2, hor+4, w, 5, col);
-  if(g.island.kind==='big'){
-    // a far-off lighthouse marker
-    px(x+w*0.28, hor+6-h*0.95, 4, 16, '#d8b96a');
-    px(x+w*0.27-1, hor+6-h*0.95-3, 7, 3, '#ffe9a8');
+  ctx.moveTo(W/2-4, topY); ctx.lineTo(W/2-58, baseY);
+  ctx.lineTo(W/2+58, baseY); ctx.lineTo(W/2+4, topY);
+  ctx.closePath(); ctx.fillStyle='#12305a'; ctx.fill();
+  ctx.globalAlpha = 1;
+  for(var i=0;i<5;i++){
+    var t=i/5;
+    var y = topY + (baseY-topY)*t;
+    var w = 6 + 52*t;
+    var jit = Math.sin(g.driftTime*7 + i*1.7)*3;
+    px(W/2 - w/2 + jit, y, w, 2, '#1c4472');
+  }
+}
+
+function drawIslandSil(x, baseY, wdt, kind){
+  var h = kind==='big' ? wdt*0.44 : wdt*0.34;
+  ctx.fillStyle = '#05070f';
+  ctx.beginPath();
+  ctx.moveTo(x-wdt/2, baseY+4);
+  ctx.lineTo(x-wdt*0.32, baseY+4-h*0.52);
+  ctx.lineTo(x-wdt*0.13, baseY+4-h);
+  ctx.lineTo(x+wdt*0.05, baseY+4-h*0.6);
+  ctx.lineTo(x+wdt*0.27, baseY+4-h*0.84);
+  ctx.lineTo(x+wdt/2, baseY+4);
+  ctx.closePath(); ctx.fill();
+  px(x-wdt/2, baseY+2, wdt, Math.max(3, wdt*0.04), '#05070f');
+  if(kind==='big'){
+    px(x+wdt*0.29, baseY+4-h*0.98, Math.max(2,wdt*0.022), Math.max(9,wdt*0.09), '#d8b96a');
+    px(x+wdt*0.28, baseY+1-h*0.98, Math.max(4,wdt*0.05), 3, '#ffe9a8');
+  }
+}
+
+function drawIslands(){
+  var list = g.islands.slice().sort((a,b)=> b.d - a.d);
+  for(var i=0;i<list.length;i++){
+    var is = list[i];
+    var x = projX(is.lane, is.d);
+    if(x < -260 || x > W+260) continue;
+    var y = projY(is.d);
+    var wdt = (is.kind==='big'?210:130) * projScale(is.d);
+    var inRange = is.d<=17 && Math.abs(is.lane-g.heading)<0.34;
+    if(inRange){
+      ctx.globalAlpha = 0.30 + 0.22*Math.sin(g.driftTime*6);
+      var w1 = wdt*1.18, h1 = (is.kind==='big'?wdt*0.52:wdt*0.42);
+      ctx.fillStyle='#ffd34d';
+      ctx.fillRect(x-w1/2, y+4-h1, w1, h1);
+      ctx.globalAlpha = 1;
+    }
+    drawIslandSil(x, y, wdt, is.kind);
   }
 }
 
 function drawRaft(){
-  var hor = H*0.60;
-  var bob = Math.sin(g.scrollX*0.05)*2;
-  var rx = 84, ry = hor + 44 + bob;
-  px(rx, ry, 46, 4, '#6b4a2a');
-  px(rx+2, ry+4, 42, 3, '#4f371f');
-  px(rx+6, ry-2, 4, 2, '#8a6238');
-  px(rx+22, ry-30, 3, 30, '#3a2a18'); // mast
+  var cx = W/2;
+  var bob = Math.sin(g.driftTime*2.2)*1.5;
+  var deckTop = H*0.80 + bob;
+  // deck, seen from behind and slightly above: a trapezoid
+  ctx.fillStyle='#6b4a2a';
+  ctx.beginPath();
+  ctx.moveTo(cx-30, deckTop); ctx.lineTo(cx+30, deckTop);
+  ctx.lineTo(cx+46, H*0.955); ctx.lineTo(cx-46, H*0.955);
+  ctx.closePath(); ctx.fill();
+  // plank lines
+  for(var i=1;i<4;i++){
+    var t=i/4, y=deckTop + (H*0.955-deckTop)*t, w=30+16*t;
+    px(cx-w, y, w*2, 1, '#4f371f');
+  }
+  px(cx-30, deckTop, 60, 3, '#8a6238');
+  // mast + sail
+  px(cx-2, deckTop-78, 4, 78, '#3a2a18');
   ctx.fillStyle='#c9b48a';
-  ctx.beginPath(); ctx.moveTo(rx+25, ry-30); ctx.lineTo(rx+25, ry-6); ctx.lineTo(rx+41, ry-10); ctx.closePath(); ctx.fill();
-  // the little sailor
-  px(rx+16, ry-12, 6, 8, '#d7d9e6');
-  px(rx+17, ry-15, 4, 4, '#2a2a38');
+  ctx.beginPath();
+  ctx.moveTo(cx+2, deckTop-74); ctx.lineTo(cx+2, deckTop-14); ctx.lineTo(cx+34, deckTop-22);
+  ctx.closePath(); ctx.fill();
+  // the sailor, from behind
+  px(cx-5, deckTop-20, 10, 13, '#d7d9e6');
+  px(cx-4, deckTop-26, 8, 7, '#2a2a38');
+  px(cx-9, deckTop-14, 5, 8, '#d7d9e6');
+  px(cx+4, deckTop-14, 5, 8, '#d7d9e6');
+  // tiller
+  px(cx-1, deckTop+2, 3, 12, '#4f371f');
+}
+
+function drawFleet(){
+  if(g.fleet < 4) return;
+  var cx = W/2;
+  var base = H*1.02 - g.fleet*0.72;
+  var wdt = 44 + g.fleet*1.7;
+  var hgt = 26 + g.fleet*0.95;
+  ctx.globalAlpha = 0.55 + 0.45*(g.fleet/100);
+  ctx.fillStyle='#0a0a12';
+  ctx.beginPath();
+  ctx.moveTo(cx-wdt/2, base);
+  ctx.lineTo(cx-wdt*0.1, base-hgt);
+  ctx.lineTo(cx+wdt*0.12, base-hgt*0.72);
+  ctx.lineTo(cx+wdt/2, base);
+  ctx.closePath(); ctx.fill();
+  px(cx-wdt/2, base-3, wdt, 5, '#0a0a12');
+  if(g.fleet>70) px(cx-3, base-hgt-6, 6, 6, '#e0705a');
+  ctx.globalAlpha = 1;
 }
 
 function bar(x,y,w,v,col,label){
@@ -339,27 +454,21 @@ function drawHUD(){
   bar(12,80,110,g.fleet/100, g.fleet>70?'#e0705a':'#c8a04a', 'FLEET '+Math.round(g.fleet));
   ctx.fillStyle='#c8cbe0'; ctx.font='10px ui-monospace,monospace';
   ctx.fillText('MATERIALS '+g.materials+(g.powerups?('   POWER x'+g.powerups):''), 12, 104);
-  ctx.fillText('LEG '+(g.dockings+1)+' / '+(g.maxIslands+1), W-110, 20);
+  ctx.fillText('LEG '+(g.dockings+1)+' / '+(g.maxIslands+1), W-104, 20);
   ctx.fillStyle='#8fa0c8'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText(g.msg, 12, H-10);
+  ctx.fillText(g.msg, 12, H-12);
 }
 
 function drawDrift(){
-  drawSky(); drawSea(); drawFog(); drawIsland(); drawRaft();
-  if(g.fleet > 4){
-    var fx = -60 + g.fleet*1.6;
-    var hor = H*0.60;
-    var fy = hor + 46 + Math.sin(g.scrollX*0.04+1)*1.5;
-    px(fx, fy, 42, 6, '#0a0a12');
-    px(fx+6, fy-18, 3, 18, '#0a0a12');
-    px(fx+9, fy-32, 22, 14, '#120f18');
-    px(fx+9, fy-32, 22, 2, '#1c1826');
-    if(g.fleet>70){ px(fx+8, fy-36, 4, 4, '#e0705a'); }
-  }
-  if(!g.island){
-    ctx.fillStyle='rgba(220,228,245,'+(0.5+0.4*Math.sin(g.driftTime*3))+')';
-    ctx.font='10px ui-monospace,monospace';
-    ctx.fillText('drifting...', W-90, H*0.60+24);
+  drawSky(); drawSea(); drawWake();
+  drawIslands();
+  drawRaft();
+  drawFleet();
+  var idx = dockableIndex(g);
+  if(idx>=0){
+    ctx.fillStyle='rgba(255,211,77,'+(0.55+0.4*Math.sin(g.driftTime*6))+')';
+    ctx.font='12px ui-monospace,monospace';
+    ctx.fillText('TAP TO LAND', W/2-40, HY-14);
   }
   drawHUD();
 }
@@ -369,8 +478,17 @@ function tileColor(t, x, y){
     var a = ((x*7+y*13)%3);
     return a===0?'#10314f':(a===1?'#123a5a':'#0f2c48');
   }
-  var edge=false;
   return ((x+y)%2===0)?'#2c6238':'#316a3c';
+}
+
+var BTN = { repair:{x:8,y:H-34,w:104,h:26}, sail:{x:W-112,y:H-34,w:104,h:26} };
+
+function drawButton(b, label, col){
+  px(b.x,b.y,b.w,b.h,'#101a2e');
+  px(b.x,b.y,b.w,2,col);
+  px(b.x,b.y+b.h-2,b.w,2,col);
+  ctx.fillStyle=col; ctx.font='11px ui-monospace,monospace';
+  ctx.fillText(label, b.x+10, b.y+18);
 }
 
 function drawIslandScene(){
@@ -381,11 +499,13 @@ function drawIslandScene(){
       var t=g.grid.map[y][x];
       px(x*ts, y*ts, ts, ts, tileColor(t,x,y));
       if(t===1){
-        // sand edge if next to water
         var wl = (x>0 && g.grid.map[y][x-1]===0) || (x<g.grid.w-1 && g.grid.map[y][x+1]===0) || (y>0 && g.grid.map[y-1][x]===0) || (y<g.grid.h-1 && g.grid.map[y+1][x]===0);
         if(wl) px(x*ts, y*ts, ts, 4, '#c2a86b');
       }
     }
+  }
+  if(g.player.goal){
+    px(g.player.goal.x*ts+13, g.player.goal.y*ts+13, 6, 6, '#ffd34d');
   }
   for(var i=0;i<g.pickups.length;i++){
     var p=g.pickups[i];
@@ -396,17 +516,15 @@ function drawIslandScene(){
     else if(p.k==='power'){ px(cxp+13,cyp+9,6,14,'#ffd34d'); px(cxp+9,cyp+13,14,6,'#ffd34d'); }
     else { px(cxp+10,cyp+13,12,7,p.k==='wood'?'#b07a3a':'#8a7a5a'); }
   }
-  // player
   var pxp=g.player.x*ts, pyp=g.player.y*ts;
   px(pxp+11, pyp+8, 10, 14, '#e8e8f0');
   px(pxp+12, pyp+4, 8, 6, '#2a2a38');
-  // big land marker
   if(g.islandKind==='big'){
-    ctx.fillStyle='#0a1526';
-    px(W-70,60,58,10,'#0a1526');
     ctx.fillStyle='#ffe9a8'; ctx.font='10px ui-monospace,monospace';
     ctx.fillText('THE BIG LAND', W-108, 54);
   }
+  drawButton(BTN.repair, 'REPAIR', g.materials>=2?'#9fb0d6':'#5a6478');
+  drawButton(BTN.sail, 'SET SAIL', '#9fb0d6');
   drawHUD();
 }
 
@@ -419,7 +537,7 @@ function drawOver(){
   ctx.fillStyle='#c8cbe0'; ctx.font='11px ui-monospace,monospace';
   ctx.fillText(g.msg, 150, 168);
   ctx.fillText('islands docked: '+g.dockings+'   passed: '+g.passed+'   materials left: '+g.materials, 110, 190);
-  ctx.fillText('press ENTER to sail again', 210, 220);
+  ctx.fillText('tap or press ENTER to sail again', 170, 220);
 }
 
 function render(){
@@ -428,48 +546,86 @@ function render(){
   else drawOver();
 }
 
-function movePlayer(dt){
-  if(g.scene!=='island') return;
-  var sp = 5.2; // tiles per second
-  var dx=0, dy=0;
-  if(KEYS['ArrowLeft']||KEYS['a']) dx-=1;
-  if(KEYS['ArrowRight']||KEYS['d']) dx+=1;
-  if(KEYS['ArrowUp']||KEYS['w']) dy-=1;
-  if(KEYS['ArrowDown']||KEYS['s']) dy+=1;
-  if(dx||dy){
-    var nx = g.player.tx + dx*sp*dt;
-    var ny = g.player.ty + dy*sp*dt;
-    if(nx>=0 && nx<g.grid.w) g.player.tx = nx;
-    if(ny>=0 && ny<g.grid.h) g.player.ty = ny;
-    // only allow standing where the tiles are walkable: snap back to last walkable
-    if(g.grid.map[Math.round(g.player.ty)] && g.grid.map[Math.round(g.player.ty)][Math.round(g.player.tx)]===1){
-      g.player.x = g.player.tx; g.player.y = g.player.ty;
-    } else {
-      g.player.tx = g.player.x; g.player.ty = g.player.y;
-    }
-    gatherAt(g);
-  }
-}
-
 function step(t){
   if(!last) last=t;
   var dt = Math.min(0.05, (t-last)/1000);
   last=t;
   tickDrift(g, dt);
   tickFleet(g, dt);
-  movePlayer(dt);
+  stepPlayer(g, dt);
   render();
   requestAnimationFrame(step);
 }
 
+/* ---- input: canvas coords ---- */
+function evPos(e){
+  var r = cv.getBoundingClientRect();
+  var cxp = (e.touches && e.touches[0]) ? e.touches[0].clientX : e.clientX;
+  var cyp = (e.touches && e.touches[0]) ? e.touches[0].clientY : e.clientY;
+  return { x: (cxp - r.left) * (W/r.width), y: (cyp - r.top) * (H/r.height) };
+}
+
+var dragStart = null, dragMoved = 0;
+
+function onDown(e){
+  e.preventDefault();
+  var p = evPos(e);
+  dragStart = p; dragMoved = 0;
+  if(g.scene==='drift') g.dragging = true;
+}
+
+function onMove(e){
+  if(!dragStart) return;
+  e.preventDefault();
+  var p = evPos(e);
+  var dx = p.x - dragStart.x;
+  dragMoved = Math.max(dragMoved, Math.abs(dx) + Math.abs(p.y - dragStart.y));
+  if(g.scene==='drift' && Math.abs(dx) > 2){
+    g.heading = clamp(g.heading + dx*(1.6/W), -1, 1);
+    dragStart.x = p.x;
+  }
+}
+
+function onUp(e){
+  if(!dragStart) return;
+  var p = dragStart; var moved = dragMoved;
+  dragStart = null;
+  g.dragging = false;
+  g.steer = 0;
+  if(g.ended){ g = newGame((Date.now()&0xffff)); return; }
+  if(moved > 10) return;                       // that was a drag, not a tap
+  if(g.scene==='drift'){ tryDock(g); return; }
+  if(g.scene==='island'){
+    if(hit(p, BTN.repair)){ repairRaft(g); return; }
+    if(hit(p, BTN.sail)){ setSail(g); return; }
+    var tx = Math.max(0, Math.min(g.grid.w-1, Math.floor(p.x/g.grid.tile)));
+    var ty = Math.max(0, Math.min(g.grid.h-1, Math.floor(p.y/g.grid.tile)));
+    if(walkable(g, tx, ty)) g.player.goal = { x: tx, y: ty };
+  }
+}
+
+function hit(p, b){ return p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h; }
+
+cv.addEventListener('touchstart', onDown, {passive:false});
+cv.addEventListener('touchmove', onMove, {passive:false});
+cv.addEventListener('touchend', onUp, {passive:false});
+cv.addEventListener('mousedown', onDown);
+cv.addEventListener('mousemove', onMove);
+cv.addEventListener('mouseup', onUp);
+
 window.addEventListener('keydown', (e) => {
   KEYS[e.key]=true;
+  if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A') g.steer = -1;
+  if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') g.steer = 1;
   if(e.key===' '){ e.preventDefault(); if(g.scene==='drift') tryDock(g); }
   if(e.key==='r'||e.key==='R'){ repairRaft(g); }
   if(e.key==='e'||e.key==='E'){ setSail(g); }
   if(e.key==='Enter'&&g.ended){ g=newGame((Date.now()&0xffff)); }
 });
-window.addEventListener('keyup', (e) => { KEYS[e.key]=false; });
+window.addEventListener('keyup', (e) => {
+  KEYS[e.key]=false;
+  if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A'||e.key==='ArrowRight'||e.key==='d'||e.key==='D') g.steer = 0;
+});
 
 // test hooks
 window.__game = {
@@ -478,12 +634,16 @@ window.__game = {
   tick: (dt) => { tickDrift(g, dt); return g; },
   fleetTick: (dt) => tickFleet(g, dt),
   fleet: () => g.fleet,
-  dock: () => tryDock(g),
+  steer: (v) => { g.steer = v; return g; },
+  heading: () => g.heading,
+  dockable: () => dockableIndex(g),
+  dock: (i) => tryDock(g, i),
   sail: () => setSail(g),
   repair: () => repairRaft(g),
   gather: () => gatherAt(g),
-  moveTo: (x,y) => { g.player.x=x; g.player.y=y; g.player.tx=x; g.player.ty=y; return gatherAt(g); },
+  moveTo: (x,y) => { g.player.x=x; g.player.y=y; g.player.goal=null; return gatherAt(g); },
   nextKind: () => nextKind(g),
+  islands: () => g.islands,
   scene: () => g.scene
 };
 

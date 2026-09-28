@@ -9,11 +9,13 @@ to repair or risk it is the loop.
 
 ## The loop (this slice)
 
-1. **Drift.** The raft moves on its own. Food and water tick down every
-   second you are at sea, so distance has a price.
-2. **A silhouette.** An island rises out of the fog on the horizon and
-   gets closer. You either **DOCK** (space) or let it pass (**drift on**,
-   which costs another leg of supplies and a little raft integrity).
+1. **Drift.** The view is from behind the raft, looking forward. The world
+   comes at you: islands grow out of the horizon. Food and water tick down
+   every second you are at sea, so distance has a price.
+2. **A silhouette, and a choice.** An island rises on the horizon at its own
+   lane. **Drag to steer** toward it, and once it is close and in line a
+   **TAP TO LAND** prompt appears. Land, or steer away and let it slide past
+   (which costs another leg of supplies and a little raft integrity).
 3. **Go ashore.** A small top-down island: walk it, collect food, water and
    building materials. One power-up per island (a sail-and-oar that makes
    later legs faster).
@@ -27,19 +29,24 @@ Out of food/water, or a raft that finally breaks apart, ends the run.
 
 ## Controls
 
-- `space` — dock at an approaching island
-- let it pass — drift on to the next leg
-- `WASD` / arrows — walk the island
-- `R` — repair the raft (2 materials)
-- `E` — set sail from an island
-- `enter` — sail again after a run ends
+Touch first, because most players will be on a phone:
+
+- **drag** anywhere — steer the raft left/right
+- **tap** when `TAP TO LAND` shows — dock at the island
+- **tap a tile** ashore — walk there (tap-to-move, not a d-pad)
+- **tap `REPAIR`** — patch the raft (2 materials)
+- **tap `SET SAIL`** — leave the island for the next leg
+- **tap** the end screen — sail again
+
+Keyboard still works for desktop testing: `A`/`D` or arrows steer, `space`
+docks, `R` repairs, `E` sets sail, `enter` restarts.
 
 ## What is in here
 
 - `prototype/index.html` — a **feel-test** in plain HTML5 canvas. Same loop,
   testable in any browser with no export step. This is the one to feel first.
   Its pure game core lives in `<script id="core">` and `check_core.js`
-  asserts it (25 checks, all green).
+  asserts it (42 checks, all green).
 - `godot/` — the Godot 4 project: `project.godot`, `main.tscn`, `main.gd`.
   The whole slice is drawn in code (no art assets), so it runs the moment
   the project opens. **Not yet run inside the editor** — Godot was not
@@ -49,7 +56,9 @@ Out of food/water, or a raft that finally breaks apart, ends the run.
 ## Next
 
 - Wire the real island silhouette once the height-field fork is answered
-  (side/profile view vs top-down only). Until then the silhouette is drawn
-  as a horizon shape, which is what the feel-test needs.
+  (side/profile view vs top-down only). The behind-the-raft view is now the
+  shape the feel-test wants, so the real one should slot straight in.
+- Port the new behind-the-raft view + touch controls into `godot/` (the
+  Godot cut is still the old side-on keyboard build).
 - Then the platform layer: Godot SDK for yandex.games / vk.games, and later
   an Android build.
