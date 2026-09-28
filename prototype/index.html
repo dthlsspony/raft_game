@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Raft slice</title>
+<style>
+  html,body{margin:0;height:100%;background:#05070d;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{image-rendering:pixelated;background:#05070d;box-shadow:0 0 0 2px #1b2338,0 20px 60px #000a;max-width:100vw;max-height:100vh}
+  #hint{position:fixed;left:0;right:0;bottom:8px;text-align:center;color:#8fa0c8;font-size:12px;letter-spacing:.5px;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="640" height="360"></canvas></div>
+<div id="hint">arrows / wasd &nbsp;·&nbsp; space = dock &nbsp;·&nbsp; let it pass = drift on &nbsp;·&nbsp; R = repair &nbsp;·&nbsp; E = set sail</div>
+<div id="err" style="position:fixed;top:0;left:0;color:#f66;font-size:12px;z-index:9"></div>
+<script id="core">
+/* ---- pure-ish game core: extractable, DOM-free ---- */
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+
+function rngFactory(seed){
+  var s = (seed>>>0) || 1;
+  return function(){
+    s = (s + 0x9e3779b9)>>>0;
+    var t = s;
+    t ^= t>>>16; t = Math.imul(t, 0x21f0aaad)>>>0;
+    t ^= t>>>15; t = Math.imul(t, 0x735a2d97)>>>0;
+    t ^= t>>>15;
+    return (t>>>0)/4294967296;
+  };
+}
+
+function newGame(seed){
+  var g = {
+    seed: (seed>>>0)||1,
+    rnd: rngFactory(seed),
+    scene: 'drift',
+    food: 100, water: 100, materials: 0, integrity: 100,
+    dockings: 0, passed: 0,
+    maxIslands: 3,
+    scrollX: 0,
+    driftTime: 0,
+    islandAt: 4.0,
+    island: null,
+    grid: null, player: null, pickups: null, islandKind: 'small',
+    powerups: 0, speedBonus: 0,
+    msg: 'open water',
+    ended: false, won: false
+  };
+  return g;
+}
+
+function nextKind(g){ return g.dockings >= g.maxIslands ? 'big' : 'small'; }
+
+function wearLeg(g, amt){
+  g.integrity = clamp(g.integrity - amt, 0, 100);
+  if(g.integrity <= 0){ g.scene='over'; g.ended=true; g.msg='the raft came apart'; }
+}
+
+function stormOnDepart(g){
+  var chance = (100 - g.integrity)/100 * 0.55;
+  if(g.rnd() < chance){
+    g.integrity = clamp(g.integrity - 38, 0, 100);
+    var lost = Math.floor(g.materials * 0.6);
+    g.materials -= lost;
+    if(g.integrity <= 0){
+      g.scene='over'; g.ended=true;
+      g.msg = 'storm + a broken raft. lost ' + lost + ' materials, then the sea.';
+      return g;
+    }
+    g.msg = 'storm hit. lost ' + lost + ' materials.';
+  }
+  return g;
+}
+
+function tickDrift(g, dt){
+  if(g.scene!=='drift' || g.ended) return g;
+  var speed = 90 + g.speedBonus;
+  g.scrollX += speed*dt;
+  g.food = Math.max(0, g.food - 2.6*dt);
+  g.water = Math.max(0, g.water - 2.0*dt);
+  if(g.food<=0 || g.water<=0){
+    g.scene='over'; g.ended=true; g.msg='out of supplies on the open sea';
+    return g;
+  }
+  g.driftTime += dt;
+  if(!g.island && g.driftTime >= g.islandAt){
+    g.island = { x: 760, kind: nextKind(g), seed: Math.floor(g.rnd()*1e9) };
+  }
+  if(g.island){
+    g.island.x -= speed*dt;
+    if(g.island.x <= -70){
+      var kind = g.island.kind;
+      g.island = null;
+      g.driftTime = 0;
+      g.islandAt = 3.5 + g.rnd()*2.5;
+      g.food = Math.max(0, g.food - 6);
+      g.water = Math.max(0, g.water - 5);
+      if(kind==='big'){
+        g.scene='over'; g.ended=true; g.msg='you drifted straight past the big land';
+        return g;
+      }
+      g.passed++;
+      g.msg = 'drifted on, another leg costs supplies';
+      wearLeg(g, 6);
+    }
+  }
+  return g;
+}
+
+function tryDock(g){
+  if(g.scene!=='drift' || !g.island) return g;
+  if(g.island.x > 230) { g.msg = 'too far to reach the shore yet'; return g; }
+  g.islandKind = g.island.kind;
+  g.grid = generateIsland(g.island.kind, g.island.seed);
+  g.pickups = placePickups(g.grid, g.islandKind, g.rnd);
+  g.player = { x: g.grid.spawn.x, y: g.grid.spawn.y, tx: g.grid.spawn.x, ty: g.grid.spawn.y };
+  g.scene='island';
+  g.msg = g.islandKind==='big' ? 'the big land. gather what you can.' : 'go ashore';
+  g.island = null;
+  return g;
+}
+
+function generateIsland(kind, seed){
+  var w=20, h=11, rnd = rngFactory(seed);
+  var map=[];
+  var cx=w/2-0.5, cy=h/2-0.5;
+  var rad = kind==='big' ? 6.6 : 4.6;
+  var a=rnd()*9, b=rnd()*9;
+  for(var y=0;y<h;y++){
+    var row=[];
+    for(var x=0;x<w;x++){
+      var dx=x-cx, dy=(y-cy)*1.35;
+      var d=Math.sqrt(dx*dx+dy*dy);
+      var n=Math.sin(x*0.8+a)*Math.cos(y*1.1+b)*1.1 + (rnd()-0.5)*0.8;
+      row.push(d < rad + n ? 1 : 0);
+    }
+    map.push(row);
+  }
+  // guarantee a shore tile near centre
+  if(!map[Math.floor(cy)][Math.floor(cx)]) map[Math.floor(cy)][Math.floor(cx)]=1;
+  // spawn on the lowest land tile near centre column
+  var spawn={x:Math.floor(cx), y:Math.floor(cy)};
+  for(var yy=h-1; yy>=0; yy--){
+    if(map[yy][Math.floor(cx)]){ spawn={x:Math.floor(cx), y:yy}; break; }
+  }
+  return { w:w, h:h, tile:32, map:map, spawn:spawn, kind:kind, seed:seed };
+}
+
+function placePickups(grid, kind, rnd){
+  var list=[], counts = kind==='big'
+    ? { food:6, water:6, mat:9, power:1 }
+    : { food:2, water:2, mat:3, power:1 };
+  var cells=[];
+  for(var y=0;y<grid.h;y++) for(var x=0;x<grid.w;x++) if(grid.map[y][x]) cells.push({x:x,y:y});
+  function draw(kindName, n){
+    for(var i=0;i<n;i++){
+      if(!cells.length) return;
+      var idx=Math.floor(rnd()*cells.length);
+      var c=cells.splice(idx,1)[0];
+      var k = kindName==='mat' ? (rnd()<0.5?'wood':'rope') : kindName;
+      list.push({x:c.x, y:c.y, k:k, taken:false});
+    }
+  }
+  draw('food', counts.food);
+  draw('water', counts.water);
+  draw('mat', counts.mat);
+  draw('power', counts.power);
+  return list;
+}
+
+function gatherAt(g){
+  if(g.scene!=='island') return g;
+  for(var i=0;i<g.pickups.length;i++){
+    var p=g.pickups[i];
+    if(!p.taken && p.x===g.player.tx && p.y===g.player.ty){
+      p.taken=true;
+      if(p.k==='food'){ g.food = Math.min(140, g.food+9); g.msg='+food'; }
+      else if(p.k==='water'){ g.water = Math.min(140, g.water+9); g.msg='+water'; }
+      else if(p.k==='power'){ g.powerups++; g.speedBonus+=18; g.msg='+power: sail and oar, faster legs'; }
+      else { g.materials += (p.k==='wood'?2:1); g.msg='+materials'; }
+    }
+  }
+  return g;
+}
+
+function repairRaft(g){
+  if(g.scene!=='island') return g;
+  if(g.materials < 2){ g.msg='not enough materials to repair (need 2)'; return g; }
+  g.materials -= 2;
+  g.integrity = clamp(g.integrity + 30, 0, 100);
+  g.msg = 'patched the raft. integrity ' + Math.round(g.integrity);
+  return g;
+}
+
+function setSail(g){
+  if(g.scene!=='island') return g;
+  if(g.islandKind==='big'){
+    g.scene='win'; g.won=true; g.ended=true;
+    g.msg='you reached the big land';
+    return g;
+  }
+  g.dockings++;
+  stormOnDepart(g);
+  if(g.ended) return g;
+  g.scene='drift';
+  g.driftTime = 0;
+  g.islandAt = 3.5 + g.rnd()*2.5;
+  g.scrollX = 0;
+  wearLeg(g, 4);
+  return g;
+}
+</script>
+<script>
+/* ---- render + input layer ---- */
+var cv = document.getElementById('cv');
+window.addEventListener('error', function(e){
+  var d = document.getElementById('err');
+  if(d) d.textContent = 'JSERR: ' + e.message + ' @' + e.lineno;
+});
+var ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+var W = cv.width, H = cv.height;
+var KEYS = {};
+var g = newGame(12345);
+var last = 0;
+
+function px(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(x|0,y|0,w|0,h|0); }
+
+function drawSky(){
+  var grd = ctx.createLinearGradient(0,0,0,H*0.62);
+  grd.addColorStop(0,'#0a1024');
+  grd.addColorStop(0.6,'#1b1a3a');
+  grd.addColorStop(1,'#4a3350');
+  ctx.fillStyle=grd; ctx.fillRect(0,0,W,H*0.62);
+  // a low sun smudge
+  px(W*0.62, H*0.44, 60, 6, '#7a4a6a');
+  px(W*0.63, H*0.47, 40, 3, '#a06a86');
+}
+
+function drawSea(){
+  var hor = H*0.60;
+  var bands = ['#0c1730','#102242','#0d1c38','#12284a','#0a1528'];
+  for(var i=0;i<9;i++){
+    var y = hor + i*((H-hor)/9);
+    var off = (g.scrollX*0.5 + i*13) % 80;
+    px(0, y, W, (H-hor)/9, bands[i%bands.length]);
+    // little wave ticks
+    for(var x=-80; x<W+80; x+=80){
+      px(x - off + (i%2)*30, y+3, 14, 2, '#1d3a63');
+    }
+  }
+}
+
+function drawFog(){
+  var hor = H*0.60;
+  var grd = ctx.createLinearGradient(0,hor-40,0,hor+90);
+  grd.addColorStop(0,'rgba(150,170,210,0.0)');
+  grd.addColorStop(0.45,'rgba(150,170,210,0.28)');
+  grd.addColorStop(1,'rgba(150,170,210,0.0)');
+  ctx.fillStyle=grd; ctx.fillRect(0,hor-40,W,130);
+  for(var i=0;i<5;i++){
+    var fx = (W - ((g.scrollX*0.15 + i*180)%(W+300))) ;
+    var a = 0.05 + (i%3)*0.02;
+    ctx.fillStyle='rgba(190,205,235,'+a+')';
+    ctx.fillRect(fx, hor-16 + (i%2)*10, 220, 26);
+  }
+}
+
+function drawIsland(){
+  if(!g.island) return;
+  var hor = H*0.60;
+  var x = g.island.x;
+  var t = clamp(1 - (x-90)/(W-90), 0.15, 1); // 1 = right next to raft
+  var baseW = g.island.kind==='big' ? 300 : 190;
+  var baseH = g.island.kind==='big' ? 90 : 54;
+  var w = baseW*(0.35+0.65*t);
+  var h = baseH*(0.35+0.65*t);
+  var col = '#05070f';
+  // silhouette: a couple of peaks + trunk
+  ctx.fillStyle=col;
+  ctx.beginPath();
+  ctx.moveTo(x-w/2, hor+6);
+  ctx.lineTo(x-w*0.30, hor+6-h*0.55);
+  ctx.lineTo(x-w*0.12, hor+6-h);
+  ctx.lineTo(x+w*0.06, hor+6-h*0.6);
+  ctx.lineTo(x+w*0.26, hor+6-h*0.82);
+  ctx.lineTo(x+w/2, hor+6);
+  ctx.closePath();
+  ctx.fill();
+  px(x-w/2, hor+4, w, 5, col);
+  if(g.island.kind==='big'){
+    // a far-off lighthouse marker
+    px(x+w*0.28, hor+6-h*0.95, 4, 16, '#d8b96a');
+    px(x+w*0.27-1, hor+6-h*0.95-3, 7, 3, '#ffe9a8');
+  }
+}
+
+function drawRaft(){
+  var hor = H*0.60;
+  var bob = Math.sin(g.scrollX*0.05)*2;
+  var rx = 84, ry = hor + 44 + bob;
+  px(rx, ry, 46, 4, '#6b4a2a');
+  px(rx+2, ry+4, 42, 3, '#4f371f');
+  px(rx+6, ry-2, 4, 2, '#8a6238');
+  px(rx+22, ry-30, 3, 30, '#3a2a18'); // mast
+  ctx.fillStyle='#c9b48a';
+  ctx.beginPath(); ctx.moveTo(rx+25, ry-30); ctx.lineTo(rx+25, ry-6); ctx.lineTo(rx+41, ry-10); ctx.closePath(); ctx.fill();
+  // the little sailor
+  px(rx+16, ry-12, 6, 8, '#d7d9e6');
+  px(rx+17, ry-15, 4, 4, '#2a2a38');
+}
+
+function bar(x,y,w,v,col,label){
+  px(x-1,y-1,w+2,8,'#0a0f1c');
+  px(x,y,w,6,'#1c2740');
+  px(x,y,Math.max(0,Math.round(w*clamp(v,0,1))),6,col);
+  ctx.fillStyle='#9fb0d6'; ctx.font='8px ui-monospace,monospace';
+  ctx.fillText(label, x, y-4);
+}
+
+function drawHUD(){
+  bar(12,20,110,g.food/140,'#6fcf6f','FOOD '+Math.round(g.food));
+  bar(12,40,110,g.water/140,'#5fa8ff','WATER '+Math.round(g.water));
+  bar(12,60,110,g.integrity/100,'#e0705a','RAFT '+Math.round(g.integrity));
+  ctx.fillStyle='#c8cbe0'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText('MATERIALS '+g.materials+(g.powerups?('   POWER x'+g.powerups):''), 12, 84);
+  ctx.fillText('LEG '+(g.dockings+1)+' / '+(g.maxIslands+1), W-110, 20);
+  ctx.fillStyle='#8fa0c8'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText(g.msg, 12, H-10);
+}
+
+function drawDrift(){
+  drawSky(); drawSea(); drawFog(); drawIsland(); drawRaft();
+  if(!g.island){
+    ctx.fillStyle='rgba(220,228,245,'+(0.5+0.4*Math.sin(g.driftTime*3))+')';
+    ctx.font='10px ui-monospace,monospace';
+    ctx.fillText('drifting...', W-90, H*0.60+24);
+  }
+  drawHUD();
+}
+
+function tileColor(t, x, y){
+  if(t===0){
+    var a = ((x*7+y*13)%3);
+    return a===0?'#10314f':(a===1?'#123a5a':'#0f2c48');
+  }
+  var edge=false;
+  return ((x+y)%2===0)?'#2c6238':'#316a3c';
+}
+
+function drawIslandScene(){
+  px(0,0,W,H,'#0a1526');
+  var ts=g.grid.tile;
+  for(var y=0;y<g.grid.h;y++){
+    for(var x=0;x<g.grid.w;x++){
+      var t=g.grid.map[y][x];
+      px(x*ts, y*ts, ts, ts, tileColor(t,x,y));
+      if(t===1){
+        // sand edge if next to water
+        var wl = (x>0 && g.grid.map[y][x-1]===0) || (x<g.grid.w-1 && g.grid.map[y][x+1]===0) || (y>0 && g.grid.map[y-1][x]===0) || (y<g.grid.h-1 && g.grid.map[y+1][x]===0);
+        if(wl) px(x*ts, y*ts, ts, 4, '#c2a86b');
+      }
+    }
+  }
+  for(var i=0;i<g.pickups.length;i++){
+    var p=g.pickups[i];
+    if(p.taken) continue;
+    var cxp=p.x*ts, cyp=p.y*ts;
+    if(p.k==='food'){ px(cxp+11,cyp+12,10,9,'#6fcf6f'); px(cxp+14,cyp+8,4,4,'#3f8f3f'); }
+    else if(p.k==='water'){ px(cxp+11,cyp+11,10,11,'#5fa8ff'); px(cxp+13,cyp+9,6,3,'#a9d4ff'); }
+    else if(p.k==='power'){ px(cxp+13,cyp+9,6,14,'#ffd34d'); px(cxp+9,cyp+13,14,6,'#ffd34d'); }
+    else { px(cxp+10,cyp+13,12,7,p.k==='wood'?'#b07a3a':'#8a7a5a'); }
+  }
+  // player
+  var pxp=g.player.x*ts, pyp=g.player.y*ts;
+  px(pxp+11, pyp+8, 10, 14, '#e8e8f0');
+  px(pxp+12, pyp+4, 8, 6, '#2a2a38');
+  // big land marker
+  if(g.islandKind==='big'){
+    ctx.fillStyle='#0a1526';
+    px(W-70,60,58,10,'#0a1526');
+    ctx.fillStyle='#ffe9a8'; ctx.font='10px ui-monospace,monospace';
+    ctx.fillText('THE BIG LAND', W-108, 54);
+  }
+  drawHUD();
+}
+
+function drawOver(){
+  px(0,0,W,H,'#05070d');
+  drawSea();
+  ctx.fillStyle = g.won ? '#8fe38f' : '#e0705a';
+  ctx.font='16px ui-monospace,monospace';
+  ctx.fillText(g.won?'YOU MADE LAND':'THE SEA WON', 190, 140);
+  ctx.fillStyle='#c8cbe0'; ctx.font='11px ui-monospace,monospace';
+  ctx.fillText(g.msg, 150, 168);
+  ctx.fillText('islands docked: '+g.dockings+'   passed: '+g.passed+'   materials left: '+g.materials, 110, 190);
+  ctx.fillText('press ENTER to sail again', 210, 220);
+}
+
+function render(){
+  if(g.scene==='drift') drawDrift();
+  else if(g.scene==='island') drawIslandScene();
+  else drawOver();
+}
+
+function movePlayer(dt){
+  if(g.scene!=='island') return;
+  var sp = 5.2; // tiles per second
+  var dx=0, dy=0;
+  if(KEYS['ArrowLeft']||KEYS['a']) dx-=1;
+  if(KEYS['ArrowRight']||KEYS['d']) dx+=1;
+  if(KEYS['ArrowUp']||KEYS['w']) dy-=1;
+  if(KEYS['ArrowDown']||KEYS['s']) dy+=1;
+  if(dx||dy){
+    var nx = g.player.tx + dx*sp*dt;
+    var ny = g.player.ty + dy*sp*dt;
+    if(nx>=0 && nx<g.grid.w) g.player.tx = nx;
+    if(ny>=0 && ny<g.grid.h) g.player.ty = ny;
+    // only allow standing where the tiles are walkable: snap back to last walkable
+    if(g.grid.map[Math.round(g.player.ty)] && g.grid.map[Math.round(g.player.ty)][Math.round(g.player.tx)]===1){
+      g.player.x = g.player.tx; g.player.y = g.player.ty;
+    } else {
+      g.player.tx = g.player.x; g.player.ty = g.player.y;
+    }
+    gatherAt(g);
+  }
+}
+
+function step(t){
+  if(!last) last=t;
+  var dt = Math.min(0.05, (t-last)/1000);
+  last=t;
+  tickDrift(g, dt);
+  movePlayer(dt);
+  render();
+  requestAnimationFrame(step);
+}
+
+window.addEventListener('keydown', function(e){
+  KEYS[e.key]=true;
+  if(e.key===' '){ e.preventDefault(); if(g.scene==='drift') tryDock(g); }
+  if(e.key==='r'||e.key==='R'){ repairRaft(g); }
+  if(e.key==='e'||e.key==='E'){ setSail(g); }
+  if(e.key==='Enter'&&g.ended){ g=newGame((Date.now()&0xffff)); }
+});
+window.addEventListener('keyup', function(e){ KEYS[e.key]=false; });
+
+// test hooks
+window.__game = {
+  state: function(){ return g; },
+  reset: function(seed){ g=newGame(seed===undefined?999:seed); return g; },
+  tick: function(dt){ return tickDrift(g, dt); },
+  dock: function(){ return tryDock(g); },
+  sail: function(){ return setSail(g); },
+  repair: function(){ return repairRaft(g); },
+  gather: function(){ return gatherAt(g); },
+  moveTo: function(x,y){ g.player.x=x; g.player.y=y; g.player.tx=x; g.player.ty=y; return gatherAt(g); },
+  nextKind: function(){ return nextKind(g); },
+  scene: function(){ return g.scene; }
+};
+
+requestAnimationFrame(step);
+</script>
+</body>
+</html>
