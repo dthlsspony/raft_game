@@ -38,6 +38,7 @@ function newGame(seed){
     scene: 'drift',
     food: 100, water: 100, materials: 0, integrity: 100,
     dockings: 0, passed: 0,
+    fleet: 0,
     maxIslands: 3,
     scrollX: 0,
     driftTime: 0,
@@ -70,6 +71,17 @@ function stormOnDepart(g){
       return g;
     }
     g.msg = 'storm hit. lost ' + lost + ' materials.';
+  }
+  return g;
+}
+
+function tickFleet(g, dt){
+  if(g.ended) return g;
+  if(g.scene!=='drift' && g.scene!=='island') return g;
+  g.fleet = Math.min(100, g.fleet + 0.7*dt);
+  if(g.fleet >= 100){
+    g.scene='over'; g.ended=true;
+    g.msg='the fleet caught you';
   }
   return g;
 }
@@ -324,8 +336,9 @@ function drawHUD(){
   bar(12,20,110,g.food/140,'#6fcf6f','FOOD '+Math.round(g.food));
   bar(12,40,110,g.water/140,'#5fa8ff','WATER '+Math.round(g.water));
   bar(12,60,110,g.integrity/100,'#e0705a','RAFT '+Math.round(g.integrity));
+  bar(12,80,110,g.fleet/100, g.fleet>70?'#e0705a':'#c8a04a', 'FLEET '+Math.round(g.fleet));
   ctx.fillStyle='#c8cbe0'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText('MATERIALS '+g.materials+(g.powerups?('   POWER x'+g.powerups):''), 12, 84);
+  ctx.fillText('MATERIALS '+g.materials+(g.powerups?('   POWER x'+g.powerups):''), 12, 104);
   ctx.fillText('LEG '+(g.dockings+1)+' / '+(g.maxIslands+1), W-110, 20);
   ctx.fillStyle='#8fa0c8'; ctx.font='10px ui-monospace,monospace';
   ctx.fillText(g.msg, 12, H-10);
@@ -333,6 +346,16 @@ function drawHUD(){
 
 function drawDrift(){
   drawSky(); drawSea(); drawFog(); drawIsland(); drawRaft();
+  if(g.fleet > 4){
+    var fx = -60 + g.fleet*1.6;
+    var hor = H*0.60;
+    var fy = hor + 46 + Math.sin(g.scrollX*0.04+1)*1.5;
+    px(fx, fy, 42, 6, '#0a0a12');
+    px(fx+6, fy-18, 3, 18, '#0a0a12');
+    px(fx+9, fy-32, 22, 14, '#120f18');
+    px(fx+9, fy-32, 22, 2, '#1c1826');
+    if(g.fleet>70){ px(fx+8, fy-36, 4, 4, '#e0705a'); }
+  }
   if(!g.island){
     ctx.fillStyle='rgba(220,228,245,'+(0.5+0.4*Math.sin(g.driftTime*3))+')';
     ctx.font='10px ui-monospace,monospace';
@@ -433,6 +456,7 @@ function step(t){
   var dt = Math.min(0.05, (t-last)/1000);
   last=t;
   tickDrift(g, dt);
+  tickFleet(g, dt);
   movePlayer(dt);
   render();
   requestAnimationFrame(step);
@@ -451,7 +475,9 @@ window.addEventListener('keyup', (e) => { KEYS[e.key]=false; });
 window.__game = {
   state: () => g,
   reset: (seed) => { g = newGame(seed===undefined?999:seed); return g; },
-  tick: (dt) => tickDrift(g, dt),
+  tick: (dt) => { tickDrift(g, dt); return g; },
+  fleetTick: (dt) => tickFleet(g, dt),
+  fleet: () => g.fleet,
   dock: () => tryDock(g),
   sail: () => setSail(g),
   repair: () => repairRaft(g),

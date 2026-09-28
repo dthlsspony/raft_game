@@ -81,5 +81,12 @@ let stormCount=0;
 for(let s=1;s<=200;s++){ let x=newGame(s); x.integrity=1; stormOnDepart(x); if(x.msg.indexOf('storm')>=0) stormCount++; }
 ok('storms happen sometimes', stormCount>0 && stormCount<200);
 
+// fleet closes and can catch
+let g6 = newGame(6); tickFleet(g6, 10);
+ok('fleet grows', g6.fleet > 0);
+g6.fleet = 99.9; tickFleet(g6, 1);
+ok('fleet catches you', g6.ended && g6.scene==='over');
+ok('fleet message', g6.msg.indexOf('fleet')>=0);
+
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);
