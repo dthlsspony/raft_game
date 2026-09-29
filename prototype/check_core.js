@@ -233,12 +233,24 @@ if(pV && pV.indexOf(g.isle.graph.tower)<0){
 
 /* 6h no actions left means no more moves */
 g = C.newGame(1); landAt(g,0);
-const nb0 = g.isle.graph.adj[0][0];
-while(g.isle.actions>0) C.moveTo(g, nb0);
+let hops6h=0;
+while(g.isle.actions>0 && hops6h<80){
+  const nb = g.isle.graph.adj[g.isle.at].filter(i=>i!==g.isle.at)[0];
+  if(nb===undefined) break;
+  C.moveTo(g, nb); hops6h++;
+}
 const atNow = g.isle.at, actsNow = g.isle.actions;
 const nbNow = g.isle.graph.adj[atNow].filter(i=>i!==atNow)[0];
 if(nbNow!==undefined) C.moveTo(g, nbNow);
 ok('no actions left refuses movement', g.isle.at===atNow && g.isle.actions===actsNow);
+
+/* 6h2 tapping the dot you already stand on costs nothing (the bug Parent
+   found: poking your own tile burned an action point) */
+g = C.newGame(1); landAt(g,0);
+const actsBefore = g.isle.actions, atBefore = g.isle.at;
+C.moveTo(g, g.isle.at);
+ok('standing still costs no action', g.isle.actions===actsBefore && g.isle.at===atBefore,
+   g.isle.actions+' vs '+actsBefore);
 
 /* 6i next day resets actions and eats rations */
 const fB = g.food;

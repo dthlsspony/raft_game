@@ -324,10 +324,9 @@ function bearingWord(dx, dy){
   return BEARINGS[k];
 }
 
-/* arriving somewhere runs what is there. Tapping the dot you are
-   standing on just does it again (another forage, another climb).
-   A resource dot is not run on arrival: walking there only reveals it
-   and presses nothing. GATHER is the one action that collects. */
+/* arriving somewhere runs what is there. Walking onto a resource dot
+   only reveals it; GATHER is the one action that collects. Standing
+   still is free, so tapping the dot under you costs nothing. */
 function runNode(g, idx){
   var is = g.isle, gr = is.graph, node = gr.nodes[idx];
   node.seen = true;
@@ -368,16 +367,18 @@ function runNode(g, idx){
   return g;
 }
 
-/* one action, one move (or one repeat action where you stand). */
+/* one action, one move. Tapping the dot you are already standing on
+   is not a move: it costs nothing, so nobody loses a point by poking
+   the ground under their feet. */
 function moveTo(g, idx){
   if(g.scene!=='island' || !g.isle) return g;
   var is = g.isle, gr = is.graph;
   if(typeof idx!=='number' || idx<0 || idx>=gr.n){ say(g, 'There is nowhere called that.'); return g; }
+  if(idx===is.at){ say(g, 'You are already standing here. GATHER works this spot.'); return g; }
   if(is.actions<=0){ say(g, 'No actions left today. Make camp.'); return g; }
-  var here = (idx===is.at);
-  if(!here && gr.adj[is.at].indexOf(idx)<0){ say(g, 'No path from here to that one.'); return g; }
+  if(gr.adj[is.at].indexOf(idx)<0){ say(g, 'No path from here to that one.'); return g; }
   is.actions--;
-  if(!here) is.at = idx;
+  is.at = idx;
   return runNode(g, idx);
 }
 
@@ -1039,9 +1040,15 @@ function drawChart(){
     var p=chartPos(t.lane, t.dist);
     var within = t.dist <= reach;
     var col = t.big ? (within?'#ffd34d':'#b39a55') : (within?'#bfe9ff':'#6f93ad');
-    ctx.globalAlpha = within ? 1 : 0.8;
+    var pulse = 0.5 + 0.5*Math.sin(g.time*2.6 + i*1.9);
+    /* a breathing halo keeps the idle chart from reading as a still
+       image: every sighted island flickers, in reach ones brighter. */
+    ctx.globalAlpha = (within ? 0.30 : 0.16) * (0.40 + 0.60*pulse);
+    ctx.fillStyle = within ? '#63d6a0' : '#5d7f95';
+    ctx.beginPath(); ctx.arc(p.x, p.y, (t.big?12:8) + pulse*3.5, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = within ? (0.72 + 0.28*pulse) : 0.8;
     ctx.strokeStyle = within ? '#dff2ff' : '#5d7f95'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.arc(p.x, p.y, t.big?8:5, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(p.x, p.y, (t.big?8:5) + pulse*1.4, 0, Math.PI*2); ctx.stroke();
     ctx.fillStyle=col;
     ctx.beginPath(); ctx.arc(p.x, p.y, t.big?4.5:2.6, 0, Math.PI*2); ctx.fill();
     ctx.globalAlpha=1;
@@ -1324,7 +1331,7 @@ function onUp(e){
     if(hit(p, ISLE_BTNS.gather)){ gatherHere(g); return; }
     if(hit(p, ISLE_BTNS.sail)){ setSail(g); return; }
     var node = pickNode(p);
-    if(node){ moveTo(g, node); return; }
+    if(node!==null && node!==undefined){ moveTo(g, node); return; }
     return;
   }
   if(g.scene==='sail'){
