@@ -7,7 +7,7 @@
 <style>
   html,body{margin:0;height:100%;background:#123a52;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace;touch-action:none;-webkit-user-select:none;user-select:none}
   #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
-  canvas{image-rendering:pixelated;background:#2e7fc4;box-shadow:0 0 0 2px #2b6d90,0 20px 60px #0006;max-width:100vw;max-height:100vh;touch-action:none}
+  canvas{background:#2e7fc4;box-shadow:0 0 0 2px #2b6d90,0 20px 60px #0006;touch-action:none}
   #hint{display:none}
 </style>
 </head>
@@ -571,9 +571,37 @@ window.addEventListener('error', (e) => {
   if(d) d.textContent = 'JSERR: ' + e.message + ' @' + e.lineno;
 });
 var ctx = cv.getContext('2d');
-ctx.imageSmoothingEnabled = false;
-var W = cv.width, H = cv.height;
+ctx.imageSmoothingEnabled = true;
+var W = 360, H = 640;            /* fixed design units */
+var DPR = 1;
+/* fill as much of the screen as the 9:16 design allows, and render the
+   backing store at device resolution so text stays crisp, not blocky. */
+function fitViewport(){
+  var s = Math.min(window.innerWidth/W, window.innerHeight/H);
+  cv.style.width = Math.floor(W*s)+'px';
+  cv.style.height = Math.floor(H*s)+'px';
+  DPR = Math.min(2, Math.max(1, window.devicePixelRatio||1));
+  cv.width = Math.round(W*DPR);
+  cv.height = Math.round(H*DPR);
+}
+fitViewport();
+window.addEventListener('resize', fitViewport);
+window.addEventListener('orientationchange', fitViewport);
 var HY = H*0.42;
+
+/* view transform for the map screens: pinch to zoom, drag to pan. All
+   gestures live in design units; buttons stay in screen units on top. */
+var VIEW = { z:1, x:0, y:0 };
+function clampView(){
+  VIEW.z = clamp(VIEW.z, 1, 3.4);
+  VIEW.x = clamp(VIEW.x, W - W*VIEW.z, 0);
+  VIEW.y = clamp(VIEW.y, H - H*VIEW.z, 0);
+}
+function resetView(){ VIEW.z=1; VIEW.x=0; VIEW.y=0; }
+function applyBase(){ ctx.setTransform(DPR,0,0,DPR,0,0); }
+function applyWorld(){ ctx.setTransform(DPR*VIEW.z,0,0,DPR*VIEW.z, DPR*VIEW.x, DPR*VIEW.y); }
+function toWorld(p){ return { x:(p.x-VIEW.x)/VIEW.z, y:(p.y-VIEW.y)/VIEW.z }; }
+function sceneIsMap(){ return g.scene==='chart' || g.scene==='island'; }
 var KEYS = {};
 var g = newGame(12345);
 var last = 0;
@@ -1017,33 +1045,33 @@ function iconRaft(x,y){
   ctx.beginPath(); ctx.moveTo(x,y-9); ctx.lineTo(x+4.5,y-2); ctx.lineTo(x,y-2); ctx.closePath(); ctx.fill();
 }
 function bar(x,y,w,v,col,label){
-  ctx.fillStyle='#08131f'; rr(x-1,y-3,w+2,10,4); ctx.fill();
-  ctx.fillStyle='#24405a'; rr(x,y-2,w,7,3); ctx.fill();
+  ctx.fillStyle='#08131f'; rr(x-1,y-4,w+2,12,4); ctx.fill();
+  ctx.fillStyle='#2a4a66'; rr(x,y-3,w,8,3); ctx.fill();
   var fw = Math.max(0, w*clamp(v,0,1));
   if(fw > 0.5){
-    var grd = ctx.createLinearGradient(x,y-2,x,y+5);
+    var grd = ctx.createLinearGradient(x,y-3,x,y+5);
     grd.addColorStop(0, mix(col,'#ffffff',0.40));
     grd.addColorStop(1, col);
-    ctx.fillStyle=grd; rr(x,y-2,fw,7,3); ctx.fill();
+    ctx.fillStyle=grd; rr(x,y-3,fw,8,3); ctx.fill();
   }
-  ctx.fillStyle='#dceaf6'; ctx.font='7px ui-monospace,monospace';
-  ctx.fillText(label, x+1, y-5);
+  ctx.fillStyle='#f2f8ff'; ctx.font='11px ui-monospace,monospace';
+  ctx.fillText(label, x+1, y-7);
 }
 function drawHUD(){
   ctx.save();
-  ctx.globalAlpha=0.90; ctx.fillStyle='#04223a'; rr(8,8,214,100,9); ctx.fill();
-  ctx.globalAlpha=1; ctx.strokeStyle='#5aa0c4'; ctx.lineWidth=2; rr(8,8,214,100,9); ctx.stroke();
-  ctx.globalAlpha=0.70; ctx.fillStyle='#04223a'; rr(8,H-32,W-16,24,7); ctx.fill();
-  ctx.strokeStyle='#2b6d90'; ctx.lineWidth=1; rr(8,H-32,W-16,24,7); ctx.stroke();
+  ctx.globalAlpha=0.90; ctx.fillStyle='#04223a'; rr(6,6,252,132,10); ctx.fill();
+  ctx.globalAlpha=1; ctx.strokeStyle='#5aa0c4'; ctx.lineWidth=2; rr(6,6,252,132,10); ctx.stroke();
+  ctx.globalAlpha=0.80; ctx.fillStyle='#04223a'; rr(6,H-42,W-12,36,8); ctx.fill();
+  ctx.strokeStyle='#2b6d90'; ctx.lineWidth=1; rr(6,H-42,W-12,36,8); ctx.stroke();
   ctx.restore();
-  iconFood(24,24); iconWater(24,46); iconRaft(24,68);
-  bar(36,24,120,g.food/140,'#7fd98a','FOOD '+Math.round(g.food));
-  bar(36,46,120,g.water/140,'#6fb6ff','WATER '+Math.round(g.water));
-  bar(36,68,120,g.integrity/100,'#f0836a','RAFT '+Math.round(g.integrity));
-  ctx.fillStyle='#ffffff'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText('LEGS '+g.legs+(g.materials?('   MAT '+g.materials):'')+(g.towers?('   TOWERS '+g.towers):''), 36, 92);
-  ctx.fillStyle='#eaf4ff'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText(g.msg, 16, H-15);
+  iconFood(28,32); iconWater(28,66); iconRaft(28,100);
+  bar(46,34,190,g.food/140,'#7fd98a','FOOD '+Math.round(g.food));
+  bar(46,68,190,g.water/140,'#6fb6ff','WATER '+Math.round(g.water));
+  bar(46,102,190,g.integrity/100,'#f0836a','RAFT '+Math.round(g.integrity));
+  ctx.fillStyle='#ffffff'; ctx.font='12px ui-monospace,monospace';
+  ctx.fillText('LEGS '+g.legs+(g.materials?('   MAT '+g.materials):'')+(g.towers?('   TOWERS '+g.towers):''), 46, 128);
+  ctx.fillStyle='#f2f8ff'; ctx.font='13px ui-monospace,monospace';
+  ctx.fillText(g.msg, 14, H-18);
 }
 function drawSail(){
   drawSky(); drawFarIslands(); drawSea(); drawWake();
@@ -1051,11 +1079,12 @@ function drawSail(){
   var t = g.targets[g.target];
   if(t && t.dist <= LAND_RANGE){
     ctx.save();
-    ctx.globalAlpha=0.55; ctx.fillStyle='#04223a'; rr(W/2-68,HY-30,136,20,6); ctx.fill();
+    ctx.globalAlpha=0.72; ctx.fillStyle='#04223a'; rr(W/2-92,HY-38,184,28,7); ctx.fill();
     ctx.restore();
-    ctx.fillStyle = 'rgba(255,220,110,'+(0.60+0.35*Math.sin(g.time*6))+')';
-    ctx.font='12px ui-monospace,monospace';
-    ctx.fillText('TAP TO MAKE LANDFALL', W/2-62, HY-16);
+    ctx.fillStyle = 'rgba(255,224,120,'+(0.65+0.35*Math.sin(g.time*6))+')';
+    ctx.font='15px ui-monospace,monospace';
+    var lt='TAP TO MAKE LANDFALL', ltw=ctx.measureText(lt).width;
+    ctx.fillText(lt, Math.round(W/2-ltw/2), HY-18);
   }
   if(g.hitFlash>0){ ctx.globalAlpha=g.hitFlash/0.35*0.5; px(0,0,W,H,'#e0705a'); ctx.globalAlpha=1; }
   drawHUD();
@@ -1063,7 +1092,7 @@ function drawSail(){
 
 /* ---- chart ---- */
 var CHART_C = { x:W/2, y:H*0.78, R:Math.min(W,H)*0.60 };
-var CHART_BTNS = { back: {x:W-182, y:12, w:170, h:44, label:'BACK ASHORE', sub:''} };
+var CHART_BTNS = { back: {x:W-182, y:8, w:172, h:52, label:'BACK ASHORE', sub:''} };
 function chartPos(lane, dist){
   var ang = lane*1.15;
   var r = (dist/DMAX) * CHART_C.R;
@@ -1083,10 +1112,12 @@ function drawCompass(x,y){
   ctx.fillText('N', x-3, y-19);
   ctx.restore();
 }
-function drawChart(){
+function drawChartBg(){
   var grd = ctx.createLinearGradient(0,0,0,H);
   grd.addColorStop(0,'#0d3a57'); grd.addColorStop(1,'#0a2c44');
   ctx.fillStyle=grd; ctx.fillRect(0,0,W,H);
+}
+function drawChartWorld(){
   ctx.strokeStyle='rgba(90,150,180,0.10)'; ctx.lineWidth=1;
   for(var yy=18; yy<H; yy+=34){
     ctx.beginPath();
@@ -1105,9 +1136,9 @@ function drawChart(){
   ctx.globalAlpha=0.12; ctx.fillStyle='#63d6a0';
   ctx.beginPath(); ctx.arc(CHART_C.x, CHART_C.y, Math.max(6,rr2), Math.PI, 0); ctx.fill();
   ctx.globalAlpha=1;
-  ctx.fillStyle='#eef4ff'; px(CHART_C.x-4, CHART_C.y-4, 8, 8, '#eef4ff');
+  ctx.fillStyle='#eef4ff'; px(CHART_C.x-5, CHART_C.y-5, 10, 10, '#eef4ff');
   ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.arc(CHART_C.x, CHART_C.y, 7, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(CHART_C.x, CHART_C.y, 9, 0, Math.PI*2); ctx.stroke();
   var shown = 0;
   for(var i=0;i<g.targets.length;i++){
     var t=g.targets[i];
@@ -1115,51 +1146,60 @@ function drawChart(){
     shown++;
     var p=chartPos(t.lane, t.dist);
     var within = t.dist <= reach;
-    var col = t.big ? (within?'#ffd34d':'#b39a55') : (within?'#bfe9ff':'#6f93ad');
+    var col = t.big ? (within?'#ffd34d':'#c9ad5e') : (within?'#dff0ff':'#9fbed2');
     var pulse = 0.5 + 0.5*Math.sin(g.time*2.6 + i*1.9);
     /* a breathing halo keeps the idle chart from reading as a still
        image: every sighted island flickers, in reach ones brighter. */
     ctx.globalAlpha = (within ? 0.30 : 0.16) * (0.40 + 0.60*pulse);
-    ctx.fillStyle = within ? '#63d6a0' : '#5d7f95';
-    ctx.beginPath(); ctx.arc(p.x, p.y, (t.big?12:8) + pulse*3.5, 0, Math.PI*2); ctx.fill();
-    ctx.globalAlpha = within ? (0.72 + 0.28*pulse) : 0.8;
-    ctx.strokeStyle = within ? '#dff2ff' : '#5d7f95'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.arc(p.x, p.y, (t.big?8:5) + pulse*1.4, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = within ? '#63d6a0' : '#7fa0b6';
+    ctx.beginPath(); ctx.arc(p.x, p.y, (t.big?16:11) + pulse*4.5, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = within ? (0.72 + 0.28*pulse) : 0.85;
+    ctx.strokeStyle = within ? '#dff2ff' : '#7fa0b6'; ctx.lineWidth=1.4;
+    ctx.beginPath(); ctx.arc(p.x, p.y, (t.big?10:6.5) + pulse*2, 0, Math.PI*2); ctx.stroke();
     ctx.fillStyle=col;
-    ctx.beginPath(); ctx.arc(p.x, p.y, t.big?4.5:2.6, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, t.big?6:3.8, 0, Math.PI*2); ctx.fill();
     ctx.globalAlpha=1;
-    ctx.font='9px ui-monospace,monospace';
+    ctx.font='12px ui-monospace,monospace';
     var lw = ctx.measureText(t.name).width;
-    ctx.globalAlpha=0.72; px(p.x-lw/2-2, p.y-18, lw+4, 11, '#04223a'); ctx.globalAlpha=1;
-    ctx.fillStyle = within ? '#eef4ff' : '#9fb8cc';
-    ctx.fillText(t.name, p.x-lw/2, p.y-9);
+    ctx.globalAlpha=0.88; px(p.x-lw/2-4, p.y-24, lw+8, 16, '#04223a'); ctx.globalAlpha=1;
+    ctx.fillStyle = within ? '#ffffff' : '#cfe0ee';
+    ctx.fillText(t.name, p.x-lw/2, p.y-12);
   }
-  ctx.fillStyle='#eef4ff'; ctx.font='12px ui-monospace,monospace';
-  ctx.fillText('CHART  reach '+Math.round(reach)+'u', 14, 24);
-  ctx.fillStyle='#9fd0e8'; ctx.font='9px ui-monospace,monospace';
-  ctx.fillText('towers sighted: '+g.towers, 14, 40);
-  ctx.fillStyle='#cfe4f2'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText(g.msg, 14, H-12);
-  ctx.fillStyle='#9fb8cc';
-  ctx.fillText(shown? 'tap an island to set a heading' : 'no island in sight', 14, H-30);
+  g._chartShown = shown;
+}
+function drawChartChrome(){
+  var shown = g._chartShown||0;
+  ctx.fillStyle='#eef4ff'; ctx.font='16px ui-monospace,monospace';
+  ctx.fillText('CHART  reach '+Math.round(reachOf(g))+'u', 14, 26);
+  ctx.fillStyle='#bfe0f2'; ctx.font='12px ui-monospace,monospace';
+  ctx.fillText('towers sighted: '+g.towers, 14, 46);
+  ctx.fillStyle='#f2f8ff'; ctx.font='13px ui-monospace,monospace';
+  ctx.fillText(g.msg, 14, H-14);
+  ctx.fillStyle='#d7e8f4'; ctx.font='11px ui-monospace,monospace';
+  ctx.fillText(shown? 'tap an island to head there · pinch to zoom' : 'no island in sight', 14, H-34);
   if(g.isle){
     var bb = {x:CHART_BTNS.back.x, y:CHART_BTNS.back.y, w:CHART_BTNS.back.w, h:CHART_BTNS.back.h,
               label:'BACK ASHORE', sub:g.isle.name};
     drawBtn(bb, true);
   }
 }
+function drawChart(){
+  drawChartBg();
+  ctx.save(); applyWorld(); drawChartWorld(); ctx.restore();
+  drawChartChrome();
+}
 
 /* ---- island: a place you walk, one action per move ---- */
 var ISLE_BTNS = {
-  day:   {x:12,  y:H-66, w:106, h:44, label:'NEXT DAY', sub:''},
-  gather:{x:127, y:H-66, w:106, h:44, label:'GATHER', sub:''},
-  sail:  {x:242, y:H-66, w:106, h:44, label:'SET SAIL', sub:''}
+  day:   {x:8,   y:H-80, w:110, h:54, label:'NEXT DAY', sub:''},
+  gather:{x:125, y:H-80, w:110, h:54, label:'GATHER', sub:''},
+  sail:  {x:242, y:H-80, w:110, h:54, label:'SET SAIL', sub:''}
 };
-var ISLE_RECT = {x:16, y:96, w:W-32, h:238};
+var ISLE_RECT = {x:10, y:110, w:W-20, h:300};
 function islePix(n){
   return { x: ISLE_RECT.x + n.x*ISLE_RECT.w, y: ISLE_RECT.y + n.y*ISLE_RECT.h };
 }
-var NODE_R = 12;
+var NODE_R = 22;
 function pickNode(p){
   if(!g.isle) return null;
   var gr = g.isle.graph, best=null, bd=Infinity;
@@ -1170,13 +1210,15 @@ function pickNode(p){
   }
   return (bd <= NODE_R*NODE_R) ? best : null;
 }
-function drawIslandPlace(){
+function drawIslandBg(){
   var grd = ctx.createLinearGradient(0,0,0,H);
   grd.addColorStop(0,'#0b2b3d'); grd.addColorStop(1,'#0e2230');
   ctx.fillStyle=grd; ctx.fillRect(0,0,W,H);
+}
+function drawIslandWorld(){
   var cx = ISLE_RECT.x + ISLE_RECT.w/2, cy = ISLE_RECT.y + ISLE_RECT.h*0.42;
   ctx.globalAlpha=0.5; ctx.fillStyle='#1a6f8f';
-  ctx.beginPath(); ctx.ellipse(cx, cy+ISLE_RECT.h*0.54, ISLE_RECT.w*0.50, 20, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx, cy+ISLE_RECT.h*0.54, ISLE_RECT.w*0.50, 26, 0, 0, Math.PI*2); ctx.fill();
   ctx.globalAlpha=1;
   ctx.fillStyle = '#e6d9a8';
   ctx.beginPath(); ctx.ellipse(cx, cy, ISLE_RECT.w*0.52, ISLE_RECT.h*0.50, 0, 0, Math.PI*2); ctx.fill();
@@ -1191,7 +1233,7 @@ function drawIslandPlace(){
     var tx = cx + Math.cos(ang)*rad*rx;
     var ty = cy + Math.sin(ang)*rad*ry*0.9;
     ctx.globalAlpha=0.22; ctx.fillStyle='#24624a';
-    ctx.beginPath(); ctx.ellipse(tx, ty, 16+(i%3)*5, 9+(i%2)*4, ang, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(tx, ty, 18+(i%3)*6, 10+(i%2)*5, ang, 0, Math.PI*2); ctx.fill();
   }
   ctx.globalAlpha=1;
   var is = g.isle, gr = is?is.graph:null, at = is?is.at:0;
@@ -1201,8 +1243,8 @@ function drawIslandPlace(){
       var e = gr.edges[i];
       var a = islePix(gr.nodes[e[0]]), b = islePix(gr.nodes[e[1]]);
       var live = canAct && (e[0]===at || e[1]===at);
-      ctx.strokeStyle = live ? '#bfe9ff' : '#3f6f88';
-      ctx.lineWidth = live ? 2 : 1;
+      ctx.strokeStyle = live ? '#bfe9ff' : '#4f7f98';
+      ctx.lineWidth = live ? 2.4 : 1.2;
       ctx.setLineDash(live ? [] : [3,4]);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
@@ -1212,11 +1254,11 @@ function drawIslandPlace(){
       var rad = ({north:0,'north-east':Math.PI/4,east:Math.PI/2,'south-east':3*Math.PI/4,
                   south:Math.PI,'south-west':5*Math.PI/4,west:3*Math.PI/2,'north-west':7*Math.PI/4})[is.hint.b];
       var hx = Math.sin(rad), hy = -Math.cos(rad);
-      ctx.strokeStyle='#d6c8ff'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(hp.x+hx*9, hp.y+hy*9); ctx.lineTo(hp.x+hx*30, hp.y+hy*30); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(hp.x+hx*30, hp.y+hy*30);
-      ctx.lineTo(hp.x+hx*24-hy*4, hp.y+hy*24+hx*4);
-      ctx.lineTo(hp.x+hx*24+hy*4, hp.y+hy*24-hx*4);
+      ctx.strokeStyle='#d6c8ff'; ctx.lineWidth=1.6;
+      ctx.beginPath(); ctx.moveTo(hp.x+hx*12, hp.y+hy*12); ctx.lineTo(hp.x+hx*38, hp.y+hy*38); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(hp.x+hx*38, hp.y+hy*38);
+      ctx.lineTo(hp.x+hx*30-hy*6, hp.y+hy*30+hx*6);
+      ctx.lineTo(hp.x+hx*30+hy*6, hp.y+hy*30-hx*6);
       ctx.closePath(); ctx.fillStyle='#d6c8ff'; ctx.fill();
     }
   }
@@ -1229,55 +1271,67 @@ function drawIslandPlace(){
       var kind = ISLE_KIND[n.type] || ISLE_KIND.plain;
       if(n.seen) known++;
       if(!n.seen && !current){
-        px(p.x-2, p.y-2, 4, 4, reachable ? '#7fc4ff' : '#2f6b8a');
+        px(p.x-4, p.y-4, 8, 8, reachable ? '#9fd8ff' : '#3f8098');
         if(reachable){
-          ctx.strokeStyle='#7fc4ff'; ctx.lineWidth=1;
-          ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI*2); ctx.stroke();
+          ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1.6;
+          ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI*2); ctx.stroke();
         }
         continue;
       }
-      var col = current ? '#2f8f6a' : kind.col;
-      px(p.x-3, p.y-3, 6, 6, '#04223a');
-      px(p.x-2, p.y-2, 4, 4, col);
+      var col = current ? '#3dd68f' : kind.col;
+      px(p.x-6, p.y-6, 12, 12, '#04223a');
+      px(p.x-4, p.y-4, 8, 8, col);
       if(reachable && !current){
-        ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1;
-        ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI*2); ctx.stroke();
+        ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1.6;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI*2); ctx.stroke();
       }
       var lbl = kind.label;
-      ctx.font = '8px ui-monospace,monospace';
+      ctx.font = '11px ui-monospace,monospace';
       var lw = ctx.measureText(lbl).width;
-      var lx = Math.round(p.x - lw/2), ly = Math.round(p.y - 7);
-      px(lx-2, ly-7, lw+4, 10, 'rgba(4,34,58,0.88)');
+      var lx = Math.round(p.x - lw/2), ly = Math.round(p.y - 10);
+      px(lx-4, ly-13, lw+8, 15, 'rgba(4,34,58,0.95)');
       ctx.fillStyle = current ? '#ffffff' : kind.col;
       ctx.fillText(lbl, lx, ly);
     }
   }
+  g._isleKnown = known; g._isleTotal = total;
+}
+function drawIslandChrome(){
+  var is = g.isle, gr = is?is.graph:null, at = is?is.at:0;
+  var known = g._isleKnown||0, total = g._isleTotal||0;
   ctx.save();
-  ctx.globalAlpha=0.68; ctx.fillStyle='#04223a'; rr(0,0,W,92,0); ctx.fill();
+  ctx.globalAlpha=0.84; ctx.fillStyle='#04223a'; rr(0,0,W,108,0); ctx.fill();
   ctx.restore();
-  ctx.fillStyle='#eaf4ff'; ctx.font='13px ui-monospace,monospace';
-  ctx.fillText(is?is.name:'ISLAND', 12, 24);
-  ctx.fillStyle='#9fd0e8'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText('DAY ' + (is?is.day:1), 12, 46);
-  ctx.fillText('FOOD '+Math.round(g.food)+'   WATER '+Math.round(g.water), 74, 46);
-  ctx.fillText('ACTIONS', 12, 66);
+  ctx.fillStyle='#eaf4ff'; ctx.font='17px ui-monospace,monospace';
+  ctx.fillText(is?is.name:'ISLAND', 12, 26);
+  ctx.fillStyle='#cfe6f2'; ctx.font='13px ui-monospace,monospace';
+  ctx.fillText('DAY ' + (is?is.day:1), 12, 52);
+  ctx.fillText('FOOD '+Math.round(g.food)+'  WATER '+Math.round(g.water), 84, 52);
+  ctx.fillStyle='#bfe0f2';
+  ctx.textAlign='right';
+  ctx.fillText(known+'/'+total, W-12, 52);
+  ctx.textAlign='left';
+  ctx.fillStyle='#cfe6f2'; ctx.font='12px ui-monospace,monospace';
+  ctx.fillText('ACTIONS', 12, 80);
   for(var a2=0;a2<ACTIONS_PER_DAY;a2++){
     var on = is && a2 < is.actions;
-    px(74+a2*15, 57, 12, 10, on?'#7fe0a0':'#274b60');
+    px(88+a2*17, 70, 14, 12, on?'#3dd68f':'#2a4a60');
+    if(on) px(88+a2*17, 70, 14, 4, '#b8f2c8');
   }
-  ctx.fillStyle='#8fb0c4'; ctx.font='9px ui-monospace,monospace';
-  ctx.fillText('MAT '+g.materials+'   TOWERS '+g.towers, 132, 66);
-  ctx.fillText('known '+known+'/'+total+' places. tap a linked dot to walk (1 action)', 12, 88);
+  ctx.fillStyle='#cfe6f2';
+  ctx.fillText('MAT '+g.materials+'   TOWERS '+g.towers, 190, 80);
+  ctx.fillStyle='#d7e8f4'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText('tap a linked dot to walk (1 action)  ·  pinch to zoom', 12, 100);
 
-  var maxc = 52, lines = [];
+  var maxc = 46, lines = [];
   if(is){ for(var k2=0;k2<is.log.length;k2++){ var wl = wrapText(is.log[k2], maxc); for(var q=0;q<wl.length;q++) lines.push(wl[q]); } }
-  var rowH = 13, top = ISLE_RECT.y + ISLE_RECT.h + 22, bottom = H-124;
+  var rowH = 16, top = ISLE_RECT.y + ISLE_RECT.h + 24, bottom = H-108;
   var maxLines = Math.floor((bottom-top)/rowH);
   if(lines.length > maxLines) lines = lines.slice(lines.length-maxLines);
-  ctx.font='10px ui-monospace,monospace';
+  ctx.font='12px ui-monospace,monospace';
   for(var r=0;r<lines.length;r++){
     var isLast = (r === lines.length-1);
-    ctx.fillStyle = isLast ? '#eaf4ff' : '#9fc2d6';
+    ctx.fillStyle = isLast ? '#ffffff' : '#cfe2f0';
     ctx.fillText(lines[r], 12, top + r*rowH);
   }
   var noActs = !(is && is.actions>0);
@@ -1291,6 +1345,11 @@ function drawIslandPlace(){
   drawBtn(ISLE_BTNS.day, noActs);
   drawBtn(gbtn, canGather);
   drawBtn(sbtn, true);
+}
+function drawIslandPlace(){
+  drawIslandBg();
+  ctx.save(); applyWorld(); drawIslandWorld(); ctx.restore();
+  drawIslandChrome();
 }
 function wrapText(s, maxc){
   var words = String(s).split(' ');
@@ -1306,18 +1365,18 @@ function wrapText(s, maxc){
 }
 function drawBtn(b, on){
   ctx.save();
-  ctx.fillStyle='#04223a'; rr(b.x,b.y,b.w,b.h,7); ctx.fill();
-  ctx.fillStyle = on ? '#1f6288' : '#1b3a4d'; rr(b.x+2,b.y+2,b.w-4,b.h-4,5); ctx.fill();
+  ctx.fillStyle='#04223a'; rr(b.x,b.y,b.w,b.h,8); ctx.fill();
+  ctx.fillStyle = on ? '#1f6a92' : '#1b3a4d'; rr(b.x+2,b.y+2,b.w-4,b.h-4,6); ctx.fill();
   ctx.restore();
-  ctx.fillStyle = on ? '#eaf4ff' : '#8fb0c4';
-  ctx.font = '12px ui-monospace,monospace';
+  ctx.fillStyle = on ? '#ffffff' : '#9fb8cc';
+  ctx.font = '14px ui-monospace,monospace';
   var tw = ctx.measureText(b.label).width;
-  ctx.fillText(b.label, Math.round(b.x + (b.w-tw)/2), b.y + (b.sub?20:27));
+  ctx.fillText(b.label, Math.round(b.x + (b.w-tw)/2), b.y + (b.sub? Math.round(b.h*0.44) : Math.round(b.h*0.62)));
   if(b.sub){
-    ctx.font='8px ui-monospace,monospace';
+    ctx.font='10px ui-monospace,monospace';
     var sw = ctx.measureText(b.sub).width;
-    ctx.fillStyle = on ? '#9fd0e8' : '#67839a';
-    ctx.fillText(b.sub, Math.round(b.x+(b.w-sw)/2), b.y+32);
+    ctx.fillStyle = on ? '#cfe6f2' : '#7b96a8';
+    ctx.fillText(b.sub, Math.round(b.x+(b.w-sw)/2), b.y + b.h - 12);
   }
 }
 function ctext(s, y, col, font){
@@ -1329,19 +1388,22 @@ function drawOver(){
   drawSea();
   ctx.save();
   ctx.globalAlpha=0.55; px(0,0,W,H,'#04223a'); ctx.restore();
-  ctext('THE RAFT', H*0.24, '#9fd0e8', '26px ui-monospace,monospace');
-  ctext(g.won?'YOU MADE THE BIG LAND':'THE SEA WON', H*0.36, g.won?'#c8ffd8':'#ffb0a0','17px ui-monospace,monospace');
-  ctext(g.msg, H*0.44, '#eef4ff');
+  ctext('THE RAFT', H*0.24, '#9fd0e8', '30px ui-monospace,monospace');
+  ctext(g.won?'YOU MADE THE BIG LAND':'THE SEA WON', H*0.36, g.won?'#c8ffd8':'#ffb0a0','20px ui-monospace,monospace');
+  ctext(g.msg, H*0.44, '#ffffff', '13px ui-monospace,monospace');
   ctx.save();
   ctx.globalAlpha=0.5; ctx.fillStyle='#0a2434';
-  rr(W/2-120, H*0.48, 240, 30, 8); ctx.fill();
+  rr(W/2-120, H*0.48, 240, 34, 8); ctx.fill();
   ctx.restore();
-  ctext('legs '+g.legs+'   towers '+g.towers+'   raft '+Math.round(g.integrity), H*0.50, '#eef4ff');
-  ctext('tap or press ENTER to sail again', H*0.62, '#cfe4f2');
+  ctext('legs '+g.legs+'   towers '+g.towers+'   raft '+Math.round(g.integrity), H*0.505, '#ffffff', '13px ui-monospace,monospace');
+  ctext('tap or press ENTER to sail again', H*0.62, '#dceaf6', '13px ui-monospace,monospace');
 }
 
 
+var lastScene = null;
 function render(){
+  applyBase();
+  if(g.scene!==lastScene){ resetView(); lastScene=g.scene; }
   if(g.scene==='chart') drawChart();
   else if(g.scene==='sail') drawSail();
   else if(g.scene==='island') drawIslandPlace();
@@ -1358,30 +1420,54 @@ function step(t){
   requestAnimationFrame(step);
 }
 
-function evPos(e){
+function canvasPt(cx, cy){
   var r = cv.getBoundingClientRect();
-  var cxp = (e.touches && e.touches[0]) ? e.touches[0].clientX : e.clientX;
-  var cyp = (e.touches && e.touches[0]) ? e.touches[0].clientY : e.clientY;
-  return { x: (cxp - r.left) * (W/r.width), y: (cyp - r.top) * (H/r.height) };
+  return { x: (cx - r.left) * (W/r.width), y: (cy - r.top) * (H/r.height) };
 }
-var dragStart = null, dragMoved = 0;
+function evPos(e){
+  var t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+  return canvasPt(t.clientX, t.clientY);
+}
+function tDist(a,b){ var dx=a.clientX-b.clientX, dy=a.clientY-b.clientY; return Math.sqrt(dx*dx+dy*dy)||1; }
+var dragStart = null, dragMoved = 0, pinch = null;
 
 function onDown(e){
   e.preventDefault();
   audioArm();
+  if(e.touches && e.touches.length>=2 && sceneIsMap()){
+    var a=e.touches[0], b=e.touches[1];
+    var mid = canvasPt((a.clientX+b.clientX)/2, (a.clientY+b.clientY)/2);
+    pinch = { d:tDist(a,b), z:VIEW.z, wx:(mid.x-VIEW.x)/VIEW.z, wy:(mid.y-VIEW.y)/VIEW.z };
+    dragStart = null;
+    return;
+  }
   var p = evPos(e);
   dragStart = p; dragMoved = 0;
   if(g.scene==='sail') g.dragging = true;
 }
 function onMove(e){
+  if(pinch && e.touches && e.touches.length>=2){
+    e.preventDefault();
+    var a=e.touches[0], b=e.touches[1];
+    var mid = canvasPt((a.clientX+b.clientX)/2, (a.clientY+b.clientY)/2);
+    var nz = clamp(pinch.z * tDist(a,b)/pinch.d, 1, 3.4);
+    VIEW.z = nz;
+    VIEW.x = mid.x - pinch.wx*nz;
+    VIEW.y = mid.y - pinch.wy*nz;
+    clampView();
+    return;
+  }
   if(!dragStart) return;
   e.preventDefault();
   var p = evPos(e);
-  var dx = p.x - dragStart.x;
-  dragMoved = Math.max(dragMoved, Math.abs(dx) + Math.abs(p.y - dragStart.y));
+  var dx = p.x - dragStart.x, dy = p.y - dragStart.y;
+  dragMoved = Math.max(dragMoved, Math.abs(dx) + Math.abs(dy));
   if(g.scene==='sail' && Math.abs(dx) > 2){
     g.heading = clamp(g.heading + dx*(1.6/W), -1, 1);
     dragStart.x = p.x;
+  } else if(sceneIsMap() && VIEW.z > 1.001){
+    VIEW.x += dx; VIEW.y += dy; clampView();
+    dragStart.x = p.x; dragStart.y = p.y;
   }
 }
 function pickChart(p){
@@ -1389,11 +1475,12 @@ function pickChart(p){
     var t=g.targets[i];
     if(t.done || !t.revealed) continue;
     var c=chartPos(t.lane, t.dist);
-    if(Math.abs(p.x-c.x) < 24 && Math.abs(p.y-c.y) < 22){ chooseTarget(g, i); return true; }
+    if(Math.abs(p.x-c.x) < 26 && Math.abs(p.y-c.y) < 24){ chooseTarget(g, i); return true; }
   }
   return false;
 }
 function onUp(e){
+  if(pinch){ pinch = null; dragStart = null; g.dragging = false; g.steer = 0; return; }
   if(!dragStart) return;
   var p = dragStart; var moved = dragMoved;
   dragStart = null; g.dragging = false; g.steer = 0;
@@ -1401,13 +1488,13 @@ function onUp(e){
   if(moved > 16) return;
   if(g.scene==='chart'){
     if(g.isle && hit(p, CHART_BTNS.back)){ returnToIsland(g); return; }
-    pickChart(p); return;
+    pickChart(toWorld(p)); return;
   }
   if(g.scene==='island'){
     if(hit(p, ISLE_BTNS.day)){ endDay(g); return; }
     if(hit(p, ISLE_BTNS.gather)){ gatherHere(g); return; }
     if(hit(p, ISLE_BTNS.sail)){ setSail(g); return; }
-    var node = pickNode(p);
+    var node = pickNode(toWorld(p));
     if(node!==null && node!==undefined){ moveTo(g, node); return; }
     return;
   }
@@ -1468,6 +1555,9 @@ window.__game = {
   integrity: () => g.integrity,
   chartPos: (l,d) => chartPos(l,d),
   pickChart: (x,y) => pickChart({x:x,y:y}),
+  view: () => ({z:VIEW.z, x:VIEW.x, y:VIEW.y}),
+  setView: (z,x,y) => { VIEW.z=z; VIEW.x=x; VIEW.y=y; clampView(); return {z:VIEW.z, x:VIEW.x, y:VIEW.y}; },
+  world: (p) => toWorld(p),
   audioState: () => ({ armed: AU.ok, hasCtx: !!AU.ctx, state: AU.ctx ? AU.ctx.state : null }),
   sound: (n) => { if(sfx[n]) sfx[n](); return true; }
 };
