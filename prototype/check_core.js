@@ -9,7 +9,7 @@ const fn = new Function(core + `
           clamp, DMAX, BASE_SPEED, planRifts, canLand, doLandfall, makeIsle,
           moveTo, runNode, endDay, revealFromTower, ensureDestinations,
           makeIsleGraph, isleHops, bearingWord,
-          gatherHere, setSail,
+          gatherHere, doGather, setSail, returnToIsland,
           ACTIONS_PER_DAY, DAY_FOOD, DAY_WATER,
           LAND_RANGE, RIFT_KEEPOUT, RIFT_HIT};
 `);
@@ -113,6 +113,28 @@ function walkPath(g, path){
     C.moveTo(g, step);
   }
 }
+function refill(g){
+  let guard=0;
+  while(g.isle && g.isle.actions<=0 && g.scene==='island' && guard++<40){ g.food=200; g.water=200; C.endDay(g); }
+  return g;
+}
+function nearestKind(g, kinds){
+  const gr=g.isle.graph, hp=C.isleHops(gr.adj, g.isle.at);
+  let best=-1, bh=Infinity;
+  for(let i=0;i<gr.n;i++){ if(i===g.isle.at) continue;
+    if(kinds.indexOf(gr.nodes[i].type)<0) continue; if(hp[i]<1) continue;
+    if(hp[i]<bh){ bh=hp[i]; best=i; } }
+  return best;
+}
+function pathTo(g, target){
+  if(target<0) return null;
+  const gr=g.isle.graph, prev={}; prev[g.isle.at]=-1; const q=[g.isle.at];
+  while(q.length){ const c=q.shift(); if(c===target) break;
+    for(const nx of gr.adj[c]) if(prev[nx]===undefined){ prev[nx]=c; q.push(nx); } }
+  if(prev[target]===undefined) return null;
+  const path=[]; let c=target; while(prev[c]!==-1){ path.push(c); c=prev[c]; }
+  return path.reverse();
+}
 
 /* 6 land: the island opens as a net of 10-30 hidden places */
 g = C.newGame(1); landAt(g, 0);
@@ -165,20 +187,27 @@ const actsRef = g.isle.actions;
 C.moveTo(g, far);
 ok('a non-linked dot is refused', g.isle.at===0 && g.isle.actions===actsRef);
 
-/* 6d a grove feeds you when you find it */
+/* 6d a grove is worked, not stumbled into */
 g = C.newGame(5); landAt(g,0);
-const pF = routeTo(g,'forage');
-ok('a grove exists on the net', !!pF, String(g.isle.graph.n));
+const gNear = nearestKind(g, ['forage']);
+ok('a grove sits within a day of the beach', gNear>=0 && C.isleHops(g.isle.graph.adj,0)[gNear]<=2, String(gNear));
 g.food=120; g.water=120;
-const fBefore = g.food; walkPath(g, pF);
-ok('a grove feeds you when you find it', g.food > fBefore, g.food+' vs '+fBefore);
+const fBefore = g.food;
+walkPath(g, pathTo(g, gNear));
+ok('arriving at a grove does not gather by itself', g.food === fBefore, g.food+' vs '+fBefore);
+refill(g);
+C.gatherHere(g);
+ok('a grove feeds you when you stand and gather', g.food > fBefore, g.food+' vs '+fBefore);
 
-/* 6e rocks give materials when you find them */
+/* 6e rocks give materials when you work them */
 g = C.newGame(5); landAt(g,0);
-const pT = routeTo(g,'timber');
-ok('rocks exist on the net', !!pT);
-const mBefore = g.materials; walkPath(g, pT);
-ok('rocks give materials when you find them', g.materials > mBefore, String(g.materials));
+const tNear = nearestKind(g, ['timber']);
+ok('rocks exist on the net', tNear>=0);
+const mBefore = g.materials;
+walkPath(g, pathTo(g, tNear));
+refill(g);
+C.gatherHere(g);
+ok('rocks give materials when you stand and gather', g.materials > mBefore, String(g.materials));
 
 /* 6f the tower is found by walking, and it sights islands */
 g = C.newGame(5); landAt(g,0);
@@ -225,12 +254,17 @@ g.food = 1;
 C.endDay(g);
 ok('running out on land strands you', g.scene==='over' && g.ended, g.scene);
 
-/* 8 leaving returns to the chart */
+/* 8 leaving keeps the island; a chosen heading drops it */
 g = C.newGame(1);
 C.chooseTarget(g, 0); g.targets[0].dist = 5; C.doLandfall(g);
 C.leaveIsland(g);
 ok('leaveIsland returns to the chart', g.scene==='chart');
-ok('leaving clears the island', g.isle===null);
+ok('the island is kept while you choose', !!g.isle);
+C.returnToIsland(g);
+ok('BACK ASHORE returns to the island', g.scene==='island' && g.isle.at===0, g.scene);
+C.setSail(g);
+C.chooseTarget(g, 1);
+ok('a chosen heading clears the old island', g.isle===null && g.scene==='sail', g.scene);
 
 /* 9 no dead end: with nothing sighted, the big land appears */
 g = C.newGame(1);
@@ -305,30 +339,14 @@ ok('cannot re-choose a visited island', g.scene==='chart');
 
 /* 17 the run that died on Parent's phone: forced onto a small island,
 near-empty, and it has to be survivable */
-function pathTo(g, target){
-  const gr=g.isle.graph, prev={}; prev[g.isle.at]=-1; const q=[g.isle.at];
-  while(q.length){ const c=q.shift(); if(c===target) break;
-    for(const nx of gr.adj[c]) if(prev[nx]===undefined){ prev[nx]=c; q.push(nx); } }
-  if(prev[target]===undefined) return null;
-  const path=[]; let c=target; while(prev[c]!==-1){ path.push(c); c=prev[c]; }
-  return path.reverse();
-}
-function nearestKind(g, kinds){
-  const gr=g.isle.graph, hp=C.isleHops(gr.adj, g.isle.at);
-  let best=-1, bh=Infinity;
-  for(let i=0;i<gr.n;i++){ if(i===g.isle.at) continue;
-    if(kinds.indexOf(gr.nodes[i].type)<0) continue; if(hp[i]<1) continue;
-    if(hp[i]<bh){ bh=hp[i]; best=i; } }
-  return best;
-}
 function playSupplyDay(g, order){
   for(const kind of order){
     if(g.isle.actions<=0) break;
     const tgt = nearestKind(g, [kind]); if(tgt<0) continue;
     const p = pathTo(g, tgt); if(!p) continue;
     while(p.length && g.isle.actions>0) C.moveTo(g, p.shift());
+    if(g.isle.actions>0) C.gatherHere(g);
   }
-  if(g.isle.actions>0 && !g.ended) C.moveTo(g, g.isle.at);
 }
 [1,2,3,5,7,11,42,99,123,777,4242].forEach(seed=>{
   const q = C.newGame(seed); landAt(q,0);
@@ -369,17 +387,19 @@ const fNo = g.food;
 C.gatherHere(g);
 ok('gather with no actions refuses and costs nothing', g.isle.actions===0 && g.food===fNo);
 
-/* 19 SET SAIL is two steps: ready, gather, then push off */
+/* 19 SET SAIL is one tap to the chart; the chart can send you back ashore */
 g = C.newGame(7); landAt(g, 0); g.food = 200; g.water = 200;
-ok('the raft starts not-ready', g.isle.ready===false);
 C.setSail(g);
-ok('first sail readies the raft, still ashore', g.scene==='island' && g.isle.ready===true, g.scene);
-ok('readiness is logged', g.isle.log.join('|').toLowerCase().includes('ready'));
-const fReady = g.food;
-C.gatherHere(g);   // at the shore that refuses: proves the island loop still runs while ready
-ok('the island loop still runs while the raft is ready', g.scene==='island' && g.food===fReady);
+ok('SET SAIL opens the chart', g.scene==='chart', g.scene);
+ok('the island is kept so you can come back', !!g.isle);
+C.returnToIsland(g);
+ok('BACK ASHORE returns to the island', g.scene==='island' && g.isle.at===0, g.scene);
+const fBack = g.food;
+C.gatherHere(g);   // at the shore that refuses: proves the island loop still runs
+ok('the island loop runs after coming back', g.scene==='island' && g.food===fBack);
 C.setSail(g);
-ok('second sail leaves for the chart', g.scene==='chart' && g.isle===null, g.scene);
+C.chooseTarget(g, 1);
+ok('choosing a heading leaves the island behind', g.scene==='sail' && g.isle===null, g.scene);
 
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);

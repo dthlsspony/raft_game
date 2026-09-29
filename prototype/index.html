@@ -27,7 +27,9 @@ var RIFT_HIT = 0.30;      // share this much of the rift's lane and it bites
 var ISLE_W = 360, ISLE_H = 640;
 
 /* the island is a day budget now, not a field of pickups */
-var ACTIONS_PER_DAY = 3;      // actions you get before dark
+var ACTIONS_PER_DAY = 5;      // actions you get before dark (arrival no
+                              // longer gathers, so a resource costs a move
+                              // AND a gather: this has to fit both)
 var DAY_FOOD = 9, DAY_WATER = 7;  // each night on land eats this
 
 /* the island is a NET now, not a menu of six stops. 10-30 dots are
@@ -232,6 +234,7 @@ function chooseTarget(g, i){
   g.target = i;
   g.heading = t.lane;
   g.scene = 'sail';
+  g.isle = null;            // a chosen heading abandons the island for good
   g.time = 0;
   planRifts(g, t.dist);
   g.msg = 'heading for ' + t.name;
@@ -279,7 +282,6 @@ function makeIsle(g, t){
     at: 0,
     tower: false,
     hint: null,
-    ready: false,
     graph: gr,
     log: []
   };
@@ -323,25 +325,19 @@ function bearingWord(dx, dy){
 }
 
 /* arriving somewhere runs what is there. Tapping the dot you are
-   standing on just does it again (another forage, another climb). */
+   standing on just does it again (another forage, another climb).
+   A resource dot is not run on arrival: walking there only reveals it
+   and presses nothing. GATHER is the one action that collects. */
 function runNode(g, idx){
   var is = g.isle, gr = is.graph, node = gr.nodes[idx];
   node.seen = true;
   var kind = node.type;
   if(kind==='forage'){
-    var f = 10 + Math.floor(g.rnd()*7), w = 4 + Math.floor(g.rnd()*5);
-    g.food = Math.min(200, g.food + f);
-    g.water = Math.min(200, g.water + w);
-    say(g, 'A grove, unmarked until you pushed in. food +' + f + ', water +' + w + '.');
+    say(g, 'A grove, unmarked until you pushed in. Stand and GATHER.');
   } else if(kind==='water'){
-    var w2 = 10 + Math.floor(g.rnd()*7), f2 = 2 + Math.floor(g.rnd()*4);
-    g.water = Math.min(200, g.water + w2);
-    g.food = Math.min(200, g.food + f2);
-    say(g, 'A spring under the ferns. water +' + w2 + ', food +' + f2 + '.');
+    say(g, 'A spring under the ferns. Stand and GATHER.');
   } else if(kind==='timber'){
-    var m = 2 + Math.floor(g.rnd()*3);
-    g.materials += m;
-    say(g, 'Broken rock and deadfall. materials +' + m + '.');
+    say(g, 'Broken rock and deadfall. Stand and GATHER.');
   } else if(kind==='vantage'){
     if(is.tower){
       say(g, 'From the ridge the sighted chart reads plain.');
@@ -385,9 +381,30 @@ function moveTo(g, idx){
   return runNode(g, idx);
 }
 
-/* stand and gather: the explicit form of walking onto a dot. A resource
-   dot pays; anything else is free and says so. Re-gathering the dot you
-   already stand on is how you top up before a long leg. */
+/* the explicit gather: one action for whatever the dot under you holds. */
+function doGather(g, kind){
+  var is = g.isle, node = is.graph.nodes[is.at];
+  node.seen = true;
+  if(kind==='forage'){
+    var f = 10 + Math.floor(g.rnd()*7), w = 4 + Math.floor(g.rnd()*5);
+    g.food = Math.min(200, g.food + f);
+    g.water = Math.min(200, g.water + w);
+    say(g, 'You work the grove. food +' + f + ', water +' + w + '.');
+  } else if(kind==='water'){
+    var w2 = 10 + Math.floor(g.rnd()*7), f2 = 2 + Math.floor(g.rnd()*4);
+    g.water = Math.min(200, g.water + w2);
+    g.food = Math.min(200, g.food + f2);
+    say(g, 'You fill up at the spring. water +' + w2 + ', food +' + f2 + '.');
+  } else if(kind==='timber'){
+    var m = 2 + Math.floor(g.rnd()*3);
+    g.materials += m;
+    say(g, 'You break off rock and deadfall. materials +' + m + '.');
+  }
+  return g;
+}
+
+/* stand and gather: the only way a resource dot pays. Arriving on one
+   just reveals it, so finding a spot and working it are two acts. */
 function gatherHere(g){
   if(g.scene!=='island' || !g.isle) return g;
   var is = g.isle, node = is.graph.nodes[is.at];
@@ -398,19 +415,14 @@ function gatherHere(g){
   }
   if(is.actions<=0){ say(g, 'No actions left today. Make camp.'); return g; }
   is.actions--;
-  return runNode(g, is.at);
+  return doGather(g, kind);
 }
 
-/* Setting sail is two steps now: the first readies the raft and keeps
-   you on the island so you can gather what you forgot, the second
-   actually pushes off. Leaving is never one mis-tap. */
+/* Leaving is one tap. SET SAIL drops you on the chart to pick a heading,
+   and the chart offers BACK ASHORE, so you can return and gather before
+   you commit. No second tap on the island button itself. */
 function setSail(g){
   if(g.scene!=='island' || !g.isle) return g;
-  if(!g.isle.ready){
-    g.isle.ready = true;
-    say(g, 'The raft is ready. Gather what you need, then push off.');
-    return g;
-  }
   return leaveIsland(g);
 }
 
@@ -472,7 +484,20 @@ function backToChart(g){
 
 function leaveIsland(g){
   if(g.scene!=='island') return g;
-  return backToChart(g);
+  g.scene='chart';
+  g.target=-1;
+  g.rifts=[];
+  ensureDestinations(g);
+  g.msg='pick a heading, or go back ashore';
+  return g;
+}
+
+/* back onto the island you just left, before committing to a leg */
+function returnToIsland(g){
+  if(g.scene!=='chart' || !g.isle) return g;
+  g.scene='island';
+  g.msg='ashore at ' + g.isle.name;
+  return g;
 }
 
 /* ---------- sailing ---------- */
@@ -961,6 +986,7 @@ function drawSail(){
 
 /* ---- chart ---- */
 var CHART_C = { x:W/2, y:H*0.78, R:Math.min(W,H)*0.60 };
+var CHART_BTNS = { back: {x:W-182, y:12, w:170, h:44, label:'BACK ASHORE', sub:''} };
 function chartPos(lane, dist){
   var ang = lane*1.15;
   var r = (dist/DMAX) * CHART_C.R;
@@ -1033,6 +1059,11 @@ function drawChart(){
   ctx.fillText(g.msg, 14, H-12);
   ctx.fillStyle='#9fb8cc';
   ctx.fillText(shown? 'tap an island to set a heading' : 'no island in sight', 14, H-30);
+  if(g.isle){
+    var bb = {x:CHART_BTNS.back.x, y:CHART_BTNS.back.y, w:CHART_BTNS.back.w, h:CHART_BTNS.back.h,
+              label:'BACK ASHORE', sub:g.isle.name};
+    drawBtn(bb, true);
+  }
 }
 
 /* ---- island: a place you walk, one action per move ---- */
@@ -1173,7 +1204,7 @@ function drawIslandPlace(){
   var gbtn = {x:ISLE_BTNS.gather.x, y:ISLE_BTNS.gather.y, w:ISLE_BTNS.gather.w, h:ISLE_BTNS.gather.h,
               label:'GATHER', sub: canGather ? gatherWord : (noActs ? 'no actions' : '')};
   var sbtn = {x:ISLE_BTNS.sail.x, y:ISLE_BTNS.sail.y, w:ISLE_BTNS.sail.w, h:ISLE_BTNS.sail.h,
-              label:(is&&is.ready)?'PUSH OFF':'SET SAIL', sub:(is&&is.ready)?'raft ready':''};
+              label:'SET SAIL', sub:'pick a heading'};
   drawBtn(ISLE_BTNS.day, noActs);
   drawBtn(gbtn, canGather);
   drawBtn(sbtn, true);
@@ -1284,7 +1315,10 @@ function onUp(e){
   dragStart = null; g.dragging = false; g.steer = 0;
   if(g.ended){ g = newGame((Date.now()&0xffff)); return; }
   if(moved > 16) return;
-  if(g.scene==='chart'){ pickChart(p); return; }
+  if(g.scene==='chart'){
+    if(g.isle && hit(p, CHART_BTNS.back)){ returnToIsland(g); return; }
+    pickChart(p); return;
+  }
   if(g.scene==='island'){
     if(hit(p, ISLE_BTNS.day)){ endDay(g); return; }
     if(hit(p, ISLE_BTNS.gather)){ gatherHere(g); return; }
@@ -1337,7 +1371,7 @@ window.__game = {
   moveTo: (idx) => moveTo(g, idx),
   gather: () => gatherHere(g),
   setSail: () => setSail(g),
-  isleReady: () => !!(g.isle && g.isle.ready),
+  backAshore: () => returnToIsland(g),
   node: () => g.isle && g.isle.at,
   isleGraph: () => g.isle && g.isle.graph,
   isleTypes: () => g.isle && g.isle.graph.nodes.map(n=>n.type),
