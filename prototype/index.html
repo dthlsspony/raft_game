@@ -49,6 +49,13 @@ var ISLE_KIND = {
 };
 var BEARINGS = ['north','north-east','east','south-east','south','south-west','west','north-west'];
 
+/* sound hook: the DOM half installs a real SFX table; in a headless
+   sim or a script-only extract there is none, so every cue no-ops. */
+function cue(name, arg){
+  try{ if(typeof SFX!=='undefined' && SFX && SFX[name]) SFX[name](arg); }catch(e){}
+  return null;
+}
+
 function dist2(ax,ay,bx,by){ var dx=ax-bx, dy=ay-by; return dx*dx+dy*dy; }
 
 /* minimum spanning tree over the dots: always one connected net */
@@ -237,6 +244,7 @@ function chooseTarget(g, i){
   g.isle = null;            // a chosen heading abandons the island for good
   g.time = 0;
   planRifts(g, t.dist);
+  cue('heading');
   g.msg = 'heading for ' + t.name;
   return g;
 }
@@ -379,6 +387,7 @@ function moveTo(g, idx){
   if(gr.adj[is.at].indexOf(idx)<0){ say(g, 'No path from here to that one.'); return g; }
   is.actions--;
   is.at = idx;
+  cue('step');
   return runNode(g, idx);
 }
 
@@ -401,6 +410,7 @@ function doGather(g, kind){
     g.materials += m;
     say(g, 'You break off rock and deadfall. materials +' + m + '.');
   }
+  cue('gather', kind);
   return g;
 }
 
@@ -435,11 +445,13 @@ function endDay(g){
   if(g.food<=0 || g.water<=0){
     say(g, 'Nothing left to eat or drink. You will not last here.');
     g.scene = 'over'; g.ended = true; g.msg = 'stranded on ' + g.isle.name;
+    cue('lose');
     return g;
   }
   g.isle.day++;
   g.isle.actions = ACTIONS_PER_DAY;
   say(g, 'Day ' + g.isle.day + '. ' + ACTIONS_PER_DAY + ' actions.');
+  cue('night');
   return g;
 }
 
@@ -466,8 +478,10 @@ function doLandfall(g){
   if(t.big){
     g.scene='win'; g.won=true; g.ended=true;
     g.msg='you reached the big land';
+    cue('win');
     return g;
   }
+  cue('land');
   makeIsle(g, t);
   g.scene = 'island';
   g.msg = 'ashore at ' + t.name;
@@ -490,6 +504,7 @@ function leaveIsland(g){
   g.rifts=[];
   ensureDestinations(g);
   g.msg='pick a heading, or go back ashore';
+  cue('sail');
   return g;
 }
 
@@ -515,6 +530,7 @@ function tickSail(g, dt){
   g.water = Math.max(0, g.water - DR_WATER*dt);
   if(g.food<=0 || g.water<=0){
     g.scene='over'; g.ended=true; g.msg='out of food and water on the open sea';
+    cue('lose');
     return g;
   }
 
@@ -533,7 +549,7 @@ function tickSail(g, dt){
       g.hitFlash = 0.35;
       g.msg = 'rift. raft ' + Math.round(g.integrity);
       g.rifts.splice(i,1);
-      if(g.integrity<=0){ g.scene='over'; g.ended=true; g.msg='the raft broke apart on a rift'; return g; }
+      if(g.integrity<=0){ g.scene='over'; g.ended=true; g.msg='the raft broke apart on a rift'; cue('lose'); return g; }
     }
   }
   if(g.hitFlash>0) g.hitFlash = Math.max(0, g.hitFlash-dt);
@@ -561,6 +577,66 @@ var HY = H*0.42;
 var KEYS = {};
 var g = newGame(12345);
 var last = 0;
+
+/* ---- sound: one WebAudio layer, no assets. The context is created and
+   resumed inside the first real gesture, so autoplay policy passes.
+   Every node call is guarded, so headless runs and sims stay silent. */
+var AU = { ctx:null, ok:false };
+function audioArm(){
+  try{
+    if(!AU.ctx){
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return AU;
+      AU.ctx = new AC();
+    }
+    if(AU.ctx.state === 'suspended') AU.ctx.resume();
+    AU.ok = true;
+  }catch(e){ AU.ok = false; }
+  return AU;
+}
+function tone(freq, dur, type, vol, slideTo, delay){
+  try{
+    if(!AU.ok || !AU.ctx) return;
+    var c = AU.ctx, t0 = c.currentTime + (delay||0);
+    var o = c.createOscillator(), gn = c.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, t0);
+    if(slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20,slideTo), t0+dur);
+    var v = (vol===undefined?0.08:vol);
+    gn.gain.setValueAtTime(0.0001, t0);
+    gn.gain.exponentialRampToValueAtTime(v, t0+0.008);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+    o.connect(gn); gn.connect(c.destination);
+    o.start(t0); o.stop(t0+dur+0.02);
+  }catch(e){}
+}
+function noiseBurst(dur, vol, delay){
+  try{
+    if(!AU.ok || !AU.ctx) return;
+    var c = AU.ctx, t0 = c.currentTime + (delay||0);
+    var n = Math.floor(c.sampleRate * dur);
+    var buf = c.createBuffer(1, n, c.sampleRate);
+    var d = buf.getChannelData(0);
+    for(var i=0;i<n;i++) d[i] = (Math.random()*2-1) * (1 - i/n);
+    var s = c.createBufferSource(); s.buffer = buf;
+    var gn = c.createGain(); gn.gain.value = (vol===undefined?0.10:vol);
+    s.connect(gn); gn.connect(c.destination); s.start(t0);
+  }catch(e){}
+}
+var sfx = {
+  step:   () => { tone(150, 0.05, 'triangle', 0.05, 110); },
+  gather: (kind) => {
+    if(kind==='timber'){ tone(220,0.06,'square',0.06); tone(330,0.09,'square',0.06,0,0.06); }
+    else { tone(660,0.05,'sine',0.07); tone(880,0.10,'sine',0.07,0,0.05); }
+  },
+  heading: () => { tone(520,0.05,'square',0.05); tone(700,0.06,'square',0.05,0,0.05); },
+  sail:    () => { noiseBurst(0.35, 0.06); tone(180,0.4,'sawtooth',0.05,90); },
+  land:    () => { tone(90,0.18,'triangle',0.10,60); noiseBurst(0.18,0.08); },
+  night:   () => { tone(300,0.5,'sine',0.05,180); },
+  lose:    () => { tone(200,0.9,'sawtooth',0.07,60); },
+  win:     () => { tone(523,0.12,'square',0.07); tone(659,0.12,'square',0.07,0,0.12); tone(784,0.25,'square',0.07,0,0.24); }
+};
+var SFX = sfx;   // the core's cue() looks this up by name
 
 function px(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(x|0,y|0,w|0,h|0); }
 
@@ -1292,6 +1368,7 @@ var dragStart = null, dragMoved = 0;
 
 function onDown(e){
   e.preventDefault();
+  audioArm();
   var p = evPos(e);
   dragStart = p; dragMoved = 0;
   if(g.scene==='sail') g.dragging = true;
@@ -1351,6 +1428,7 @@ cv.addEventListener('mousemove', onMove);
 cv.addEventListener('mouseup', onUp);
 
 window.addEventListener('keydown', (e) => {
+  audioArm();
   KEYS[e.key]=true;
   if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A') g.steer = -1;
   if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') g.steer = 1;
@@ -1389,7 +1467,9 @@ window.__game = {
   leaveIsland: () => leaveIsland(g),
   integrity: () => g.integrity,
   chartPos: (l,d) => chartPos(l,d),
-  pickChart: (x,y) => pickChart({x:x,y:y})
+  pickChart: (x,y) => pickChart({x:x,y:y}),
+  audioState: () => ({ armed: AU.ok, hasCtx: !!AU.ctx, state: AU.ctx ? AU.ctx.state : null }),
+  sound: (n) => { if(sfx[n]) sfx[n](); return true; }
 };
 
 requestAnimationFrame(step);
