@@ -126,20 +126,35 @@ function makeIsleGraph(seed){
   }
   if(tower<0){ var far=-1; for(var i6=1;i6<n;i6++){ if(hops[i6]>=2 && (far<0||hops[i6]>hops[far])) far=i6; } tower=far; }
   nodes[tower].type='tower';
-  // fill the rest; each dot keeps its secret until you stand on it
+  // every dot but the shore and the tower starts a secret
   var rest=[];
   for(var i7=0;i7<n;i7++){ if(i7!==0 && i7!==tower) rest.push(i7); }
-  for(var i8=rest.length-1;i8>0;i8--){ var j8=Math.floor(rnd()*(i8+1)); var tmp=rest[i8]; rest[i8]=rest[j8]; rest[j8]=tmp; }
+  // The beach must be able to feed you. Reserve a grove and a spring on
+  // the two dots nearest the shore, so a forced resupply on a small
+  // island is a real choice and never a death sentence. Nearest = fewest
+  // hops first, then closest to the shore.
+  rest.sort((a,b)=>{
+    var ha=hops[a]<0?999:hops[a], hb=hops[b]<0?999:hops[b];
+    if(ha!==hb) return ha-hb;
+    return dist2(nodes[a].x,nodes[a].y,0.5,0.9) - dist2(nodes[b].x,nodes[b].y,0.5,0.9);
+  });
+  var nearFood = rest[0], nearWater = rest.length>1 ? rest[1] : rest[0];
+  // shuffle only the interior, so the rest of the island stays a surprise
+  var pool=[];
+  for(var i8=0;i8<rest.length;i8++){ if(rest[i8]!==nearFood && rest[i8]!==nearWater) pool.push(rest[i8]); }
+  for(var i8b=pool.length-1;i8b>0;i8b--){ var j8=Math.floor(rnd()*(i8b+1)); var tmp=pool[i8b]; pool[i8b]=pool[j8]; pool[j8]=tmp; }
   var types=[];
   var nFor=Math.max(1,Math.round(n*0.20)), nWat=Math.max(1,Math.round(n*0.16));
   var nTim=Math.max(1,Math.round(n*0.14)), nRid=1+(rnd()<0.5?1:0);
   var z;
-  for(z=0;z<nFor;z++) types.push('forage');
-  for(z=0;z<nWat;z++) types.push('water');
+  for(z=0;z<nFor-1;z++) types.push('forage');
+  for(z=0;z<nWat-1;z++) types.push('water');
   for(z=0;z<nTim;z++) types.push('timber');
   for(z=0;z<nRid;z++) types.push('vantage');
-  while(types.length<rest.length) types.push('plain');
-  for(var i9=0;i9<rest.length;i9++) nodes[rest[i9]].type = types[i9] || 'plain';
+  while(types.length<pool.length) types.push('plain');
+  for(var i9=0;i9<pool.length;i9++) nodes[pool[i9]].type = types[i9] || 'plain';
+  nodes[nearFood].type='forage';
+  nodes[nearWater].type='water';
   return {nodes:nodes, edges:edges, adj:adj, hops:hops, tower:tower, n:n};
 }
 
