@@ -1,5 +1,5 @@
 const fs = require('fs');
-const html = fs.readFileSync('/workspace/raft/index.html','utf8');
+const html = fs.readFileSync(process.argv[2] || '/workspace/raft/index.html','utf8');
 const m = html.match(/<script id="core">([\s\S]*?)<\/script>/);
 if(!m){ console.error('no core block'); process.exit(2); }
 const core = m[1];
@@ -9,6 +9,7 @@ const fn = new Function(core + `
           clamp, DMAX, BASE_SPEED, planRifts, canLand, doLandfall, makeIsle,
           moveTo, runNode, endDay, revealFromTower, ensureDestinations,
           makeIsleGraph, isleHops, bearingWord,
+          gatherHere, setSail,
           ACTIONS_PER_DAY, DAY_FOOD, DAY_WATER,
           LAND_RANGE, RIFT_KEEPOUT, RIFT_HIT};
 `);
@@ -130,6 +131,17 @@ const grA = g.isle.graph, hopsA = C.isleHops(grA.adj, 0);
 ok('every place is reachable from the shore', hopsA.every(h=>h>=0), JSON.stringify(hopsA));
 ok('the tower is a real walk, not one step', hopsA[grA.tower]>=3, String(hopsA[grA.tower]));
 ok('the tower is not adjacent to the shore', grA.adj[0].indexOf(grA.tower)<0);
+
+/* 6a1 the beach always feeds you: a grove and a spring within a day's walk,
+   so being forced to resupply on a small island is never a death sentence */
+[1,2,3,5,7,11,42,99,123,777,4242].forEach(seed=>{
+  const q = C.makeIsleGraph(seed);
+  const hp = C.isleHops(q.adj, 0);
+  const nearFood  = q.nodes.some((nd,i)=> nd.type==='forage' && hp[i]>=1 && hp[i]<=2);
+  const nearWater = q.nodes.some((nd,i)=> nd.type==='water'  && hp[i]>=1 && hp[i]<=2);
+  ok('seed '+seed+' beach has a grove within a day', nearFood,  JSON.stringify(hp)+' '+JSON.stringify(q.nodes.map(x=>x.type)));
+  ok('seed '+seed+' beach has a spring within a day', nearWater, JSON.stringify(hp)+' '+JSON.stringify(q.nodes.map(x=>x.type)));
+});
 
 /* 6a2 the net is seeded, and varies by island */
 const sig = (seed) => JSON.stringify(C.makeIsleGraph(seed).nodes.map(n=>n.type)) + '|' + C.makeIsleGraph(seed).n;
@@ -290,6 +302,84 @@ g = C.newGame(3);
 g.targets[0].done = true;
 C.chooseTarget(g, 0);
 ok('cannot re-choose a visited island', g.scene==='chart');
+
+/* 17 the run that died on Parent's phone: forced onto a small island,
+near-empty, and it has to be survivable */
+function pathTo(g, target){
+  const gr=g.isle.graph, prev={}; prev[g.isle.at]=-1; const q=[g.isle.at];
+  while(q.length){ const c=q.shift(); if(c===target) break;
+    for(const nx of gr.adj[c]) if(prev[nx]===undefined){ prev[nx]=c; q.push(nx); } }
+  if(prev[target]===undefined) return null;
+  const path=[]; let c=target; while(prev[c]!==-1){ path.push(c); c=prev[c]; }
+  return path.reverse();
+}
+function nearestKind(g, kinds){
+  const gr=g.isle.graph, hp=C.isleHops(gr.adj, g.isle.at);
+  let best=-1, bh=Infinity;
+  for(let i=0;i<gr.n;i++){ if(i===g.isle.at) continue;
+    if(kinds.indexOf(gr.nodes[i].type)<0) continue; if(hp[i]<1) continue;
+    if(hp[i]<bh){ bh=hp[i]; best=i; } }
+  return best;
+}
+function playSupplyDay(g, order){
+  for(const kind of order){
+    if(g.isle.actions<=0) break;
+    const tgt = nearestKind(g, [kind]); if(tgt<0) continue;
+    const p = pathTo(g, tgt); if(!p) continue;
+    while(p.length && g.isle.actions>0) C.moveTo(g, p.shift());
+  }
+  if(g.isle.actions>0 && !g.ended) C.moveTo(g, g.isle.at);
+}
+[1,2,3,5,7,11,42,99,123,777,4242].forEach(seed=>{
+  const q = C.newGame(seed); landAt(q,0);
+  q.food = 4; q.water = 3;
+  // play the day the way a player who is low on water would
+  playSupplyDay(q, q.water<=q.food ? ['water','forage'] : ['forage','water']);
+  const fed = q.food, wet = q.water;
+  C.endDay(q);
+  ok('seed '+seed+' a near-empty landing survives the night',
+     q.scene==='island' && q.food>0 && q.water>0,
+     'after day food '+fed+' water '+wet+' -> '+q.food+'/'+q.water);
+});
+
+/* 18 GATHER: the explicit action on a resource dot */
+g = C.newGame(7); landAt(g, 0); g.food = 200; g.water = 200;
+const gpath = routeTo(g, 'forage');
+ok('seed 7 has a reachable grove', !!gpath);
+walkPath(g, gpath || []);
+let gcamp = 0;
+while(g.isle.actions<=0 && g.scene==='island' && gcamp++<40){ g.food=200; g.water=200; C.endDay(g); }
+const gFoodB = g.food, gActB = g.isle.actions;
+C.gatherHere(g);
+ok('gather on a grove spends exactly one action', g.isle.actions===gActB-1, g.isle.actions+' vs '+gActB);
+ok('gather on a grove feeds you', g.food>gFoodB, g.food+' vs '+gFoodB);
+
+/* 18a gather where there is nothing to gather is free and says so */
+g = C.newGame(7); landAt(g, 0);
+const fShore = g.food, aShore = g.isle.actions;
+C.gatherHere(g);
+ok('gather at the shore spends nothing', g.isle.actions===aShore && g.food===fShore);
+ok('the shore refusal is logged', g.isle.log.join('|').toLowerCase().includes('nothing to gather'));
+
+/* 18b gather with no actions left refuses and costs nothing */
+g = C.newGame(7); landAt(g, 0); g.food = 200; g.water = 200;
+walkPath(g, routeTo(g, 'forage') || []);
+g.isle.actions = 0;
+const fNo = g.food;
+C.gatherHere(g);
+ok('gather with no actions refuses and costs nothing', g.isle.actions===0 && g.food===fNo);
+
+/* 19 SET SAIL is two steps: ready, gather, then push off */
+g = C.newGame(7); landAt(g, 0); g.food = 200; g.water = 200;
+ok('the raft starts not-ready', g.isle.ready===false);
+C.setSail(g);
+ok('first sail readies the raft, still ashore', g.scene==='island' && g.isle.ready===true, g.scene);
+ok('readiness is logged', g.isle.log.join('|').toLowerCase().includes('ready'));
+const fReady = g.food;
+C.gatherHere(g);   // at the shore that refuses: proves the island loop still runs while ready
+ok('the island loop still runs while the raft is ready', g.scene==='island' && g.food===fReady);
+C.setSail(g);
+ok('second sail leaves for the chart', g.scene==='chart' && g.isle===null, g.scene);
 
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);
