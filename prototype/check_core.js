@@ -5,47 +5,61 @@ if(!m){ console.error('no core block'); process.exit(2); }
 const core = m[1];
 
 const fn = new Function(core + `
-  return {newGame, reachOf, chooseTarget, tickSail, tickChart, tickIsland, leaveIsland,
-          clamp, DMAX, BASE_SPEED, planRifts, canLand, doLandfall, makeIsland,
-          LAND_RANGE, RIFT_KEEPOUT, RIFT_HIT, backToChart};
+  return {newGame, reachOf, chooseTarget, tickSail, tickChart, leaveIsland, backToChart,
+          clamp, DMAX, BASE_SPEED, planRifts, canLand, doLandfall, makeIsle,
+          moveTo, runNode, endDay, revealFromTower, ensureDestinations,
+          makeIsleGraph, isleHops, bearingWord,
+          ACTIONS_PER_DAY, DAY_FOOD, DAY_WATER,
+          LAND_RANGE, RIFT_KEEPOUT, RIFT_HIT};
 `);
 const C = fn();
 
 let pass=0, fail=0;
 function ok(name, cond, extra){ if(cond){pass++; console.log('ok  '+name);} else {fail++; console.log('FAIL '+name+(extra?'  '+extra:''));} }
 
-// 1. reach
+/* 1 reach */
 let g = C.newGame(1);
 ok('reach ~962 at full supplies', Math.abs(C.reachOf(g)-25*100/2.6) < 1, C.reachOf(g));
 
-// 2. choose target
+/* 2 choose target */
 g = C.newGame(1);
 const t0 = g.targets[0];
 C.chooseTarget(g, 0);
 ok('choose sets sail scene', g.scene==='sail');
 ok('heading takes the lane', Math.abs(g.heading - t0.lane) < 1e-9);
 
-// 3. arrival goes ashore (auto safety net still works)
+/* 2b hidden islands start hidden, two are sighted */
+g = C.newGame(1);
+ok('two nearest islands start sighted', g.targets[0].revealed && g.targets[1].revealed);
+ok('the far one starts hidden', g.targets[2].revealed === false);
+ok('the big land starts hidden', g.targets[3].revealed === false);
+
+/* 2c cannot set a heading for an island you have not sighted */
+g = C.newGame(1);
+C.chooseTarget(g, 2);
+ok('cannot choose an unsighted island', g.scene==='chart', g.scene);
+
+/* 3 arrival goes ashore */
 g = C.newGame(1);
 g.dragging = true;
 C.chooseTarget(g, 0);
 const t = g.targets[0];
 let steps=0;
 while(g.scene==='sail' && steps<100000){ g.heading = t.lane; C.tickSail(g, 1/60); steps++; }
-ok('arrival goes ashore, not straight to chart', g.scene==='island', g.scene+' '+g.msg);
+ok('arrival goes ashore', g.scene==='island', g.scene+' '+g.msg);
 ok('leg counted', g.legs===1, String(g.legs));
 ok('target marked done', g.targets[0].done===true);
-ok('island has nodes', !!(g.island && g.island.nodes.length>=4), g.island&&String(g.island.nodes.length));
+ok('island opens the day budget', !!(g.isle && g.isle.day===1 && g.isle.actions===C.ACTIONS_PER_DAY), JSON.stringify(g.isle));
 ok('landfall no longer force-refills supplies', g.food<120, String(g.food));
 
-// 4. supplies out
+/* 4 supplies out */
 g = C.newGame(1);
 C.chooseTarget(g, 0);
 g.food = 0.0001; g.water = 0.0001;
 C.tickSail(g, 1);
 ok('running dry ends the run', g.scene==='over' && g.ended, g.scene);
 
-// 5. rift hit costs the raft
+/* 5 rift hit costs the raft */
 g = C.newGame(1);
 C.chooseTarget(g, 0);
 g.rifts = [{lane:g.heading, d:5, age:1}];
@@ -53,7 +67,7 @@ const integ0 = g.integrity;
 C.tickSail(g, 1/60);
 ok('rift hit damages raft', g.integrity < integ0, g.integrity+' vs '+integ0);
 
-// 5b. rift bites when you share its lane (widened threat)
+/* 5b rift bites when you share its lane */
 g = C.newGame(1);
 C.chooseTarget(g, 0);
 g.heading = 0.20;
@@ -62,40 +76,159 @@ const iA = g.integrity;
 C.tickSail(g, 1/60);
 ok('rift in your third bites', g.integrity < iA, g.integrity+' vs '+iA);
 
-// 5c. a passed rift is culled, it does not drift along forever
+/* 5c a passed rift is culled */
 g = C.newGame(1);
 C.chooseTarget(g, 0);
 g.heading = -0.95;
 g.rifts = [{lane:0.95, d:6, age:1}];
 for(let i=0;i<120;i++) C.tickSail(g, 1/60);
-ok('a passed rift is culled, not left drifting', g.rifts.length===0, String(g.rifts.length));
+ok('a passed rift is culled', g.rifts.length===0, String(g.rifts.length));
 
-// 6. island gathering
-g = C.newGame(1);
-C.chooseTarget(g, 0);
-g.targets[0].dist = 5;
-C.doLandfall(g);
+/* ---------- the island: a net of hidden places ---------- */
+
+function landAt(g, i){
+  g.target = i; g.scene='sail'; g.heading = g.targets[i].lane; g.dragging = true;
+  g.targets[i].dist = 5;
+  C.doLandfall(g);
+  return g;
+}
+function routeTo(g, kind){
+  const gr = g.isle.graph;
+  let target = -1;
+  for(let i=0;i<gr.n;i++) if(gr.nodes[i].type===kind){ target=i; break; }
+  if(target<0) return null;
+  const prev = {}; prev[g.isle.at] = -1; const q = [g.isle.at];
+  while(q.length){ const c=q.shift(); if(c===target) break;
+    for(const nx of gr.adj[c]) if(prev[nx]===undefined){ prev[nx]=c; q.push(nx); } }
+  if(prev[target]===undefined) return null;
+  const path=[]; let c=target; while(prev[c]!==-1){ path.push(c); c=prev[c]; }
+  return path.reverse();
+}
+function walkPath(g, path){
+  for(const step of path){
+    let guard=0;
+    while(g.isle.actions<=0 && g.scene==='island' && guard++<40){ g.food=200; g.water=200; C.endDay(g); }
+    if(g.scene!=='island') return;
+    C.moveTo(g, step);
+  }
+}
+
+/* 6 land: the island opens as a net of 10-30 hidden places */
+g = C.newGame(1); landAt(g, 0);
+const gr0 = g.isle.graph;
 ok('doLandfall opens the island scene', g.scene==='island');
-const nodes = g.island.nodes;
-const foodNode = nodes.find(n=>n.kind==='food');
-ok('island has a food node', !!foodNode);
-g.island.px = foodNode.x; g.island.py = foodNode.y;
-g.island.tx = foodNode.x; g.island.ty = foodNode.y;
-C.tickIsland(g, 1/60);
-ok('stepping on a node gathers it', foodNode.taken===true);
-ok('gathering food raised food', g.food > 100, String(g.food));
-g.island.px = nodes[4] ? nodes[4].x : g.island.px;
-g.island.px = g.island.tx = nodes[nodes.length-1].x; g.island.py = g.island.ty = nodes[nodes.length-1].y;
-const matBefore = g.materials;
-C.tickIsland(g, 1/60);
-ok('a second node gathers too', nodes[nodes.length-1].taken===true);
+ok('you come ashore at the shore dot', g.isle.at === 0, String(g.isle.at));
+ok('the island opens the day budget', g.isle.day===1 && g.isle.actions===C.ACTIONS_PER_DAY);
+ok('the net holds 10..30 places', gr0.n>=10 && gr0.n<=30, String(gr0.n));
+ok('the shore is known from the start', gr0.nodes[0].seen===true && gr0.nodes[0].type==='shore');
+ok('every other place starts hidden', gr0.nodes.slice(1).every(n=>n.seen===false));
+ok('exactly one watchtower, not the shore', gr0.nodes.filter(n=>n.type==='tower').length===1 && gr0.tower!==0);
 
-// 6b. leave the island
+/* 6a the net is connected, and the tower is a real walk */
+g = C.newGame(1); landAt(g,0);
+const grA = g.isle.graph, hopsA = C.isleHops(grA.adj, 0);
+ok('every place is reachable from the shore', hopsA.every(h=>h>=0), JSON.stringify(hopsA));
+ok('the tower is a real walk, not one step', hopsA[grA.tower]>=3, String(hopsA[grA.tower]));
+ok('the tower is not adjacent to the shore', grA.adj[0].indexOf(grA.tower)<0);
+
+/* 6a2 the net is seeded, and varies by island */
+const sig = (seed) => JSON.stringify(C.makeIsleGraph(seed).nodes.map(n=>n.type)) + '|' + C.makeIsleGraph(seed).n;
+ok('the net is deterministic per seed', sig(4242)===sig(4242));
+ok('the net varies by seed', sig(4242)!==sig(4243));
+
+/* 6b one move spends one action and reveals only that dot */
+g = C.newGame(1); landAt(g,0);
+const nbr = g.isle.graph.adj[0][0];
+C.moveTo(g, nbr);
+ok('moving to a linked dot spends one action', g.isle.actions===C.ACTIONS_PER_DAY-1);
+ok('you are now on that dot', g.isle.at===nbr);
+ok('arriving reveals that dot', g.isle.graph.nodes[nbr].seen===true);
+ok('only two dots are known so far', g.isle.graph.nodes.filter(n=>n.seen).length===2);
+
+/* 6c no teleporting to an unlinked dot, and a refused move costs nothing */
+g = C.newGame(1); landAt(g,0);
+let far = -1;
+for(let i=1;i<g.isle.graph.n;i++){ if(g.isle.graph.adj[0].indexOf(i)<0){ far=i; break; } }
+const actsRef = g.isle.actions;
+C.moveTo(g, far);
+ok('a non-linked dot is refused', g.isle.at===0 && g.isle.actions===actsRef);
+
+/* 6d a grove feeds you when you find it */
+g = C.newGame(5); landAt(g,0);
+const pF = routeTo(g,'forage');
+ok('a grove exists on the net', !!pF, String(g.isle.graph.n));
+g.food=120; g.water=120;
+const fBefore = g.food; walkPath(g, pF);
+ok('a grove feeds you when you find it', g.food > fBefore, g.food+' vs '+fBefore);
+
+/* 6e rocks give materials when you find them */
+g = C.newGame(5); landAt(g,0);
+const pT = routeTo(g,'timber');
+ok('rocks exist on the net', !!pT);
+const mBefore = g.materials; walkPath(g, pT);
+ok('rocks give materials when you find them', g.materials > mBefore, String(g.materials));
+
+/* 6f the tower is found by walking, and it sights islands */
+g = C.newGame(5); landAt(g,0);
+const revBefore = g.targets.filter(x=>x.revealed).length;
+const pW = routeTo(g,'tower');
+walkPath(g, pW);
+ok('walking to the tower finds it', g.isle.tower===true && g.towers===1);
+const newSight = g.targets.filter(x=>x.revealed).length - revBefore;
+ok('the tower sights 1..3 new islands', newSight>=1 && newSight<=3, String(newSight));
+ok('tower sighting is logged', g.isle.log.join('|').toLowerCase().includes('sight'));
+
+/* 6g a ridge is a hidden pointer: a bearing, never a mark */
+g = C.newGame(5); landAt(g,0);
+const pV = routeTo(g,'vantage');
+ok('a ridge exists on the net', !!pV);
+if(pV && pV.indexOf(g.isle.graph.tower)<0){
+  walkPath(g, pV);
+  ok('the ridge gives a bearing to the tower', !!(g.isle.hint && g.isle.hint.b), JSON.stringify(g.isle.hint));
+  ok('the bearing is a compass word',
+     ['north','north-east','east','south-east','south','south-west','west','north-west'].indexOf(g.isle.hint.b)>=0,
+     g.isle.hint && g.isle.hint.b);
+}
+
+/* 6h no actions left means no more moves */
+g = C.newGame(1); landAt(g,0);
+const nb0 = g.isle.graph.adj[0][0];
+while(g.isle.actions>0) C.moveTo(g, nb0);
+const atNow = g.isle.at, actsNow = g.isle.actions;
+const nbNow = g.isle.graph.adj[atNow].filter(i=>i!==atNow)[0];
+if(nbNow!==undefined) C.moveTo(g, nbNow);
+ok('no actions left refuses movement', g.isle.at===atNow && g.isle.actions===actsNow);
+
+/* 6i next day resets actions and eats rations */
+const fB = g.food;
+C.endDay(g);
+ok('next day refills actions', g.isle.actions === C.ACTIONS_PER_DAY, String(g.isle.actions));
+ok('next day advances the day', g.isle.day === 2, String(g.isle.day));
+ok('next day eats rations', Math.abs((fB - g.food) - C.DAY_FOOD) < 1e-6, (fB-g.food)+' vs '+C.DAY_FOOD);
+ok('still on the island', g.scene==='island');
+
+/* 6j starving on land strands you */
+g = C.newGame(1); landAt(g,0);
+g.food = 1;
+C.endDay(g);
+ok('running out on land strands you', g.scene==='over' && g.ended, g.scene);
+
+/* 8 leaving returns to the chart */
+g = C.newGame(1);
+C.chooseTarget(g, 0); g.targets[0].dist = 5; C.doLandfall(g);
 C.leaveIsland(g);
 ok('leaveIsland returns to the chart', g.scene==='chart');
-ok('leaving clears the island', g.island===null);
+ok('leaving clears the island', g.isle===null);
 
-// 7. rifts are planned at leg start, in a small handful
+/* 9 no dead end: with nothing sighted, the big land appears */
+g = C.newGame(1);
+const bIdx = g.targets.findIndex(x=>x.big);
+g.targets.forEach(x => { if(!x.big){ x.done = true; x.revealed = false; } });
+g.targets[bIdx].revealed = false;
+C.backToChart(g);
+ok('no dead end: big land is sighted when the chart is empty', g.targets[bIdx].revealed === true);
+
+/* 10 rifts planned at leg start, 1-3 */
 g = C.newGame(7);
 C.chooseTarget(g, 0);
 ok('rifts planned on departure, 1-3', g.rifts.length >= 1 && g.rifts.length <= 3, String(g.rifts.length));
@@ -103,7 +236,7 @@ const nAtStart = g.rifts.length;
 for(let i=0;i<600;i++) C.tickSail(g, 1/60);
 ok('rift count never grows while sailing', g.rifts.length <= nAtStart, String(g.rifts.length));
 
-// 8. every rift is planned before the island, and out of the landing approach
+/* 11 every rift arrives before the island, out of the landing approach */
 [0,1,2,3,4,5].forEach(seed=>{
   const q = C.newGame(seed+1);
   C.chooseTarget(q, 0);
@@ -115,26 +248,23 @@ ok('rift count never grows while sailing', g.rifts.length <= nAtStart, String(g.
   ok('seed '+(seed+1)+' rifts stay out of the landing approach', clear);
 });
 
-// 9. TAP TO LAND: window opens, tap goes ashore
+/* 12 TAP TO LAND window */
 g = C.newGame(1);
 C.chooseTarget(g, 0);
 g.dragging = true;
 g.heading = g.targets[0].lane;
-let sawWindow=false, guard=0;
-while(g.scene==='sail' && guard<100000){
+let sawWindow=false, g2=0;
+while(g.scene==='sail' && g2<100000){
   g.heading = g.targets[0].lane;
-  C.tickSail(g, 1/60); guard++;
+  C.tickSail(g, 1/60); g2++;
   if(C.canLand(g)){ sawWindow=true; break; }
 }
 ok('landing window opens before the island', sawWindow);
 ok('window is not on contact', g.targets[0].dist > 8, String(g.targets[0].dist));
-const beforeDist = g.targets[0].dist;
 C.doLandfall(g);
 ok('tap lands: scene goes ashore', g.scene==='island' || g.scene==='win', g.scene);
-ok('tap lands well before drift-through distance', beforeDist > 8, String(beforeDist));
-ok('leg counted by the tap', g.legs===1, String(g.legs));
 
-// 10. tap landing on the big land wins
+/* 13 landing the big land wins */
 g = C.newGame(2);
 const bi = g.targets.findIndex(x=>x.big);
 g.target = bi; g.scene='sail'; g.heading=g.targets[bi].lane; g.dragging=true;
@@ -143,19 +273,19 @@ ok('canLand true on the big land', C.canLand(g)===true);
 C.doLandfall(g);
 ok('landing the big land wins', g.scene==='win' && g.won===true, g.scene);
 
-// 11. off-lane tap STILL lands (no forced sideways crabbing)
+/* 14 off-lane tap still lands */
 g = C.newGame(1);
 C.chooseTarget(g, 0);
 g.targets[0].dist = 60;
 g.heading = g.targets[0].lane + 1;
 ok('off-lane tap still lands', C.canLand(g)===true);
 
-// 12. rift stream deterministic per seed
+/* 15 rift stream deterministic per seed */
 function riftPlan(seed){ const q=C.newGame(seed); C.chooseTarget(q,0); return q.rifts.map(r=>Math.round(r.d*1000)+':'+Math.round(r.lane*1000)).join('|'); }
 ok('rift plan is seeded', riftPlan(42)===riftPlan(42));
 ok('rift plan varies by seed', riftPlan(42)!==riftPlan(43));
 
-// 13. choose a done target is refused
+/* 16 cannot re-choose a visited island */
 g = C.newGame(3);
 g.targets[0].done = true;
 C.chooseTarget(g, 0);
