@@ -8,12 +8,12 @@
   html,body{margin:0;height:100%;background:#123a52;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace;touch-action:none;-webkit-user-select:none;user-select:none}
   #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
   canvas{image-rendering:pixelated;background:#2e7fc4;box-shadow:0 0 0 2px #2b6d90,0 20px 60px #0006;max-width:100vw;max-height:100vh;touch-action:none}
-  #hint{position:fixed;left:0;right:0;bottom:4px;text-align:center;color:#dfeffa;font-size:11px;letter-spacing:.5px;pointer-events:none;text-shadow:0 1px 2px #0a2a3e}
+  #hint{display:none}
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="cv" width="360" height="640"></canvas></div>
-<div id="hint">chart: tap a destination &nbsp;·&nbsp; sea: drag to steer &nbsp;·&nbsp; island: tap to walk, then SET SAIL</div>
+<div id="hint"></div>
 <div id="err" style="position:fixed;top:0;left:0;color:#f66;font-size:12px;z-index:9"></div>
 <script id="core">
 /* ---- pure core: extractable, DOM-free ---- */
@@ -25,6 +25,11 @@ var LAND_RANGE = 170;     // how close you can be and still tap to land
 var RIFT_KEEPOUT = 140;   // no rift in the landing approach
 var RIFT_HIT = 0.30;      // share this much of the rift's lane and it bites
 var ISLE_W = 360, ISLE_H = 640;
+
+/* the island is a day budget now, not a field of pickups */
+var ACTIONS_PER_DAY = 3;      // actions you get before dark
+var EXPLORE_TO_TOWER = 4;     // pushes inland to stand on the watchtower
+var DAY_FOOD = 9, DAY_WATER = 7;  // each night on land eats this
 
 function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
 
@@ -47,16 +52,28 @@ function reachOf(g){
   return BASE_SPEED * secs;
 }
 
+/* islands start mostly hidden. A watchtower is what puts one on the
+   chart, so the map earns itself instead of being handed over. */
 function makeTargets(seed){
   var rnd = rngFactory(seed);
   var t = [];
-  var near = 240 + rnd()*90;
-  var mid  = 500 + rnd()*90;
-  var far  = 740 + rnd()*80;
-  t.push({lane:(rnd()*2-1)*0.85, dist:near, seed:Math.floor(rnd()*1e9), big:false, name:'ISLE A'});
-  t.push({lane:(rnd()*2-1)*0.85, dist:mid,  seed:Math.floor(rnd()*1e9), big:false, name:'ISLE B'});
-  t.push({lane:(rnd()*2-1)*0.85, dist:far,  seed:Math.floor(rnd()*1e9), big:false, name:'ISLE C'});
-  t.push({lane:(rnd()*2-1)*0.45, dist:950,  seed:Math.floor(rnd()*1e9), big:true,  name:'THE BIG LAND'});
+  // a field of islands, not three. A tower sighting of 1..3 only means
+  // something when there is more out there to find.
+  var N = 7;
+  for(var i=0;i<N;i++){
+    var lane;
+    if(i===0) lane = (rnd()*2-1)*0.5;          // one sits near the home heading
+    else lane = (rnd()*2-1)*0.85;
+    var dist = 240 + i*80 + rnd()*70;
+    t.push({lane:lane, dist:dist, seed:Math.floor(rnd()*1e9), big:false,
+            revealed:false, done:false, name:'ISLE '+String.fromCharCode(65+i)});
+  }
+  t.push({lane:(rnd()*2-1)*0.45, dist:950, seed:Math.floor(rnd()*1e9), big:true,
+          revealed:false, done:false, name:'THE BIG LAND'});
+  // sort shallow-to-deep so the two nearest are the ones sighted from home
+  t.sort((a,b)=> a.dist - b.dist);
+  var shown = 0;
+  for(var k=0;k<t.length && shown<2;k++){ if(!t[k].big){ t[k].revealed = true; shown++; } }
   return t;
 }
 
@@ -66,13 +83,13 @@ function newGame(seed){
     rnd:rngFactory(seed),
     scene:'chart',
     food:100, water:100, integrity:100, materials:0,
-    legs:0,
+    legs:0, towers:0,
     targets:makeTargets(seed),
     target:-1,
     heading:0, steer:0, dragging:false,
     time:0,
     rifts:[],
-    island:null,
+    isle:null,
     hitFlash:0,
     msg:'pick a heading',
     ended:false, won:false
@@ -80,10 +97,18 @@ function newGame(seed){
   return g;
 }
 
-function aliveTargets(g){
-  var out=[];
-  for(var i=0;i<g.targets.length;i++) if(!g.targets[i].done) out.push(i);
-  return out;
+function chooseTarget(g, i){
+  if(g.scene!=='chart') return g;
+  var t = g.targets[i];
+  if(!t || t.done) { g.msg='no such island'; return g; }
+  if(!t.revealed) { g.msg='you have not sighted that one yet'; return g; }
+  g.target = i;
+  g.heading = t.lane;
+  g.scene = 'sail';
+  g.time = 0;
+  planRifts(g, t.dist);
+  g.msg = 'heading for ' + t.name;
+  return g;
 }
 
 /* spread a small, fixed handful of rifts across the leg, so they
@@ -102,21 +127,6 @@ function planRifts(g, legDist){
   return g;
 }
 
-function chooseTarget(g, i){
-  if(g.scene!=='chart') return g;
-  var t = g.targets[i];
-  if(!t || t.done) { g.msg='no such island'; return g; }
-  g.target = i;
-  g.heading = t.lane;
-  g.scene = 'sail';
-  g.time = 0;
-  planRifts(g, t.dist);
-  g.msg = 'heading for ' + t.name;
-  return g;
-}
-
-/* tap when you are close. No lane gate anymore: lining up forced the
-   player to crab sideways, which fought the whole point of tapping. */
 function canLand(g){
   if(g.scene!=='sail') return false;
   var t = g.targets[g.target];
@@ -124,25 +134,132 @@ function canLand(g){
   return t.dist <= LAND_RANGE && t.dist > -6;
 }
 
-/* the island is a place now, not a button that refills you */
-function makeIsland(g, t){
-  var r = rngFactory((t.seed>>>0) ^ 0x51ed);
-  var n = t.big ? 5 : 4 + (r()<0.5?0:1);
-  var kinds = ['food','water','food','water','mat','plank'];
-  var nodes = [];
-  for(var i=0;i<n;i++){
-    var a = i/n*Math.PI*2 + r()*0.5;
-    var rad = 78 + r()*66;
-    nodes.push({ x:ISLE_W*0.5 + Math.cos(a)*rad, y:ISLE_H*0.46 + Math.sin(a)*rad*0.78, kind:kinds[i%kinds.length], taken:false });
+/* ---------- the island day loop (text-adventure) ---------- */
+
+function say(g, s){
+  if(!g.isle) return g;
+  g.isle.log.push(s);
+  if(g.isle.log.length > 60) g.isle.log.shift();
+  return g;
+}
+
+function makeIsle(g, t){
+  g.isle = {
+    name: t.name,
+    day: 1,
+    actions: ACTIONS_PER_DAY,
+    explore: 0,
+    tower: false,
+    log: []
+  };
+  say(g, 'You come ashore at ' + t.name + '.');
+  say(g, 'Day 1. ' + ACTIONS_PER_DAY + ' actions before dark.');
+  return g;
+}
+
+/* a found tower reveals one to three new islands. If every ordinary
+   island is already on the chart, the last tower reveals the big land. */
+function revealFromTower(g){
+  var i, out = [];
+  var normal = [], bigIdx = -1;
+  for(i=0;i<g.targets.length;i++){
+    var t = g.targets[i];
+    if(t.done || t.revealed) continue;
+    if(t.big){ bigIdx = i; continue; }
+    normal.push(i);
   }
-  g.island = { nodes:nodes, px:ISLE_W*0.5, py:ISLE_H*0.62, tx:ISLE_W*0.5, ty:ISLE_H*0.62 };
+  if(normal.length){
+    for(i=normal.length-1;i>0;i--){
+      var j = Math.floor(g.rnd()*(i+1));
+      var tmp = normal[i]; normal[i] = normal[j]; normal[j] = tmp;
+    }
+    var n = Math.min(normal.length, 1 + Math.floor(g.rnd()*3));
+    for(i=0;i<n;i++){ g.targets[normal[i]].revealed = true; out.push(g.targets[normal[i]].name); }
+  } else if(bigIdx>=0 && !g.targets[bigIdx].revealed){
+    g.targets[bigIdx].revealed = true;
+    out.push(g.targets[bigIdx].name);
+  }
+  return out;
+}
+
+function actForage(g){
+  if(!g.isle) return g;
+  if(g.isle.actions<=0){ say(g, 'No actions left today. Make camp.'); return g; }
+  g.isle.actions--;
+  var f = 10 + Math.floor(g.rnd()*7);
+  var w = 6 + Math.floor(g.rnd()*6);
+  g.food = Math.min(200, g.food + f);
+  g.water = Math.min(200, g.water + w);
+  say(g, 'You forage the treeline: food +' + f + ', water +' + w + '.');
+  return g;
+}
+
+function actTimber(g){
+  if(!g.isle) return g;
+  if(g.isle.actions<=0){ say(g, 'No actions left today. Make camp.'); return g; }
+  g.isle.actions--;
+  var m = 2 + Math.floor(g.rnd()*3);
+  g.materials += m;
+  say(g, 'You cut timber for repairs: materials +' + m + '.');
+  return g;
+}
+
+function actExplore(g){
+  if(!g.isle) return g;
+  if(g.isle.actions<=0){ say(g, 'No actions left today. Make camp.'); return g; }
+  g.isle.actions--;
+  if(g.isle.tower){ say(g, 'You climb the tower again. The horizon is the same.'); return g; }
+  g.isle.explore++;
+  if(g.isle.explore < EXPLORE_TO_TOWER){
+    say(g, 'You push inland. ' + (EXPLORE_TO_TOWER - g.isle.explore) + ' more pushes to the high ground.');
+    return g;
+  }
+  g.isle.tower = true;
+  g.towers++;
+  say(g, 'Through the canopy: a watchtower, still standing. You climb it.');
+  var seen = revealFromTower(g);
+  if(seen.length){
+    say(g, 'From the top you sight ' + seen.length + ' new island' + (seen.length>1?'s':'') + ': ' + seen.join(', ') + '.');
+  } else {
+    say(g, 'The horizon shows nothing you cannot already see.');
+  }
+  return g;
+}
+
+function endDay(g){
+  if(!g.isle) return g;
+  g.food  = Math.max(0, g.food  - DAY_FOOD);
+  g.water = Math.max(0, g.water - DAY_WATER);
+  say(g, 'Night falls. You eat and drink. food ' + Math.round(g.food) + ', water ' + Math.round(g.water) + '.');
+  if(g.food<=0 || g.water<=0){
+    say(g, 'Nothing left to eat or drink. You will not last here.');
+    g.scene = 'over'; g.ended = true; g.msg = 'stranded on ' + g.isle.name;
+    return g;
+  }
+  g.isle.day++;
+  g.isle.actions = ACTIONS_PER_DAY;
+  say(g, 'Day ' + g.isle.day + '. ' + ACTIONS_PER_DAY + ' actions.');
+  return g;
+}
+
+/* no dead ends: if the chart holds nothing reachable, the big land
+   was always out there, it just was never sighted. */
+function ensureDestinations(g){
+  var any = false, bi = -1;
+  for(var i=0;i<g.targets.length;i++){
+    var t = g.targets[i];
+    if(t.done) continue;
+    if(t.big) bi = i;
+    else if(t.revealed) any = true;
+  }
+  if(!any && bi>=0 && !g.targets[bi].revealed) g.targets[bi].revealed = true;
   return g;
 }
 
 function doLandfall(g){
   if(g.scene!=='sail') return g;
   var t = g.targets[g.target];
-  if(!t){ g.scene='chart'; return g; }
+  if(!t){ backToChart(g); return g; }
   t.done = true;
   g.legs++;
   if(t.big){
@@ -150,36 +267,18 @@ function doLandfall(g){
     g.msg='you reached the big land';
     return g;
   }
-  makeIsland(g, t);
+  makeIsle(g, t);
   g.scene = 'island';
-  g.msg = 'ashore at ' + t.name + '. tap to walk, step on what you need.';
+  g.msg = 'ashore at ' + t.name;
   return g;
 }
 
-var ISLE_SPEED = 78;
-function tickIsland(g, dt){
-  if(g.scene!=='island') return g;
-  var is = g.island;
-  if(!is) return g;
-  g.time += dt;
-  var dx = is.tx - is.px, dy = is.ty - is.py;
-  var d = Math.sqrt(dx*dx + dy*dy);
-  if(d > 1.5){
-    var st = Math.min(d, ISLE_SPEED*dt);
-    is.px += dx/d*st; is.py += dy/d*st;
-  }
-  for(var i=0;i<is.nodes.length;i++){
-    var nd = is.nodes[i];
-    if(nd.taken) continue;
-    var ndx = nd.x - is.px, ndy = nd.y - is.py;
-    if(Math.sqrt(ndx*ndx + ndy*ndy) < 17){
-      nd.taken = true;
-      if(nd.kind==='food'){ g.food = Math.min(160, g.food+30); g.msg='berries. food +30'; }
-      else if(nd.kind==='water'){ g.water = Math.min(160, g.water+30); g.msg='fresh water. +30'; }
-      else if(nd.kind==='mat'){ g.materials += 2; g.msg='timber. materials +2'; }
-      else if(nd.kind==='plank'){ g.integrity = clamp(g.integrity+18,0,100); g.msg='spare planks. raft +18'; }
-    }
-  }
+function backToChart(g){
+  g.scene='chart';
+  g.target=-1;
+  g.rifts=[];
+  g.isle=null;
+  ensureDestinations(g);
   return g;
 }
 
@@ -188,18 +287,12 @@ function leaveIsland(g){
   return backToChart(g);
 }
 
-function backToChart(g){
-  g.scene='chart';
-  g.target=-1;
-  g.rifts=[];
-  g.island=null;
-  return g;
-}
+/* ---------- sailing ---------- */
 
 function tickSail(g, dt){
   if(g.scene!=='sail' || g.ended) return g;
   var t = g.targets[g.target];
-  if(!t){ g.scene='chart'; return g; }
+  if(!t){ backToChart(g); return g; }
 
   if(g.steer) g.heading = clamp(g.heading + g.steer*1.15*dt, -1, 1);
   else if(!g.dragging) g.heading = g.heading * Math.max(0, 1 - 0.9*dt);
@@ -213,7 +306,6 @@ function tickSail(g, dt){
 
   t.dist -= BASE_SPEED*dt;
 
-  // rifts approach; hitting one costs the raft
   g.time += dt;
   for(var i=g.rifts.length-1;i>=0;i--){
     var rf=g.rifts[i];
@@ -232,14 +324,12 @@ function tickSail(g, dt){
   }
   if(g.hitFlash>0) g.hitFlash = Math.max(0, g.hitFlash-dt);
 
-  // arrival: tapping is the real path; this is only the safety net
-  // so a raft cannot sail straight past the island it aimed at.
   if(t.dist <= 8) return doLandfall(g);
   return g;
 }
 
 function tickChart(g, dt){
-  if(g.scene==='chart'){ g.time += dt; }
+  if(g.scene==='chart' || g.scene==='island'){ g.time += dt; }
   return g;
 }
 </script>
@@ -260,9 +350,6 @@ var last = 0;
 
 function px(x,y,w,h,c){ ctx.fillStyle=c; ctx.fillRect(x|0,y|0,w|0,h|0); }
 
-/* no upper clamp: a rift that has passed the raft (d<0) keeps
-   moving past instead of freezing at the horizon projection and
-   'drifting along' until it is culled. */
 function tOf(d){ return Math.max(0, 1 - d/DMAX); }
 function projScale(d){ return 0.20 + 1.55*Math.pow(tOf(d), 1.7); }
 function projX(lane, d){ var k = 26 + 320*Math.pow(tOf(d), 1.5); return W/2 + (lane - g.heading)*k; }
@@ -347,11 +434,10 @@ function drawTargetIsland(){
   var y = projY(t.dist);
   var wdt = (t.big?210:130) * projScale(t.dist);
   if(x > -300 && x < W+300){
-    var inLane = Math.abs(t.lane - g.heading) < 0.30;
     if(t.dist <= 60){
-      ctx.globalAlpha = 0.28 + 0.22*Math.sin(g.time*6) + (inLane?0.2:0);
+      ctx.globalAlpha = 0.28 + 0.22*Math.sin(g.time*6);
       var h1 = (t.big?wdt*0.52:wdt*0.42);
-      ctx.fillStyle = inLane ? '#ffd34d' : '#7a6a3a';
+      ctx.fillStyle = '#ffd34d';
       ctx.fillRect(x-wdt*0.59, y+4-h1, wdt*1.18, h1);
       ctx.globalAlpha = 1;
     }
@@ -383,7 +469,7 @@ function drawRaft(){
   px(cx+4, deckTop-14, 5, 8, '#eef1fa');
   px(cx-1, deckTop+2, 3, 12, '#6f4d2a');
 }
-function drawTail(){ // the burned-ship fleet, far behind, pure flavour
+function drawTail(){
   var cx = W/2;
   var base = H*0.995;
   ctx.globalAlpha = 0.35;
@@ -407,7 +493,7 @@ function drawHUD(){
   bar(12,40,110,g.water/140,'#5fa8ff','WATER '+Math.round(g.water));
   bar(12,60,110,g.integrity/100,'#e0705a','RAFT '+Math.round(g.integrity));
   ctx.fillStyle='#ffffff'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText('LEGS '+g.legs+(g.materials?('   MAT '+g.materials):''), 12, 84);
+  ctx.fillText('LEGS '+g.legs+(g.materials?('   MAT '+g.materials):'')+(g.towers?('   TOWERS '+g.towers):''), 12, 84);
   ctx.fillStyle='#eaf4ff'; ctx.font='10px ui-monospace,monospace';
   ctx.fillText(g.msg, 12, H-12);
 }
@@ -426,8 +512,7 @@ function drawSail(){
 }
 
 /* ---- chart ---- */
-var CHART_C = { x:W/2, y:H*0.80, R:min2(W,H)*0.60 };
-function min2(a,b){ return a<b?a:b; }
+var CHART_C = { x:W/2, y:H*0.80, R:Math.min(W,H)*0.60 };
 function chartPos(lane, dist){
   var ang = lane*1.15;
   var r = (dist/DMAX) * CHART_C.R;
@@ -435,21 +520,19 @@ function chartPos(lane, dist){
 }
 function drawChart(){
   px(0,0,W,H,'#0f3550');
-  // faint grid
   for(var x=0;x<W;x+=40) px(x,0,1,H,'#1c4f6b');
   for(var y=0;y<H;y+=40) px(0,y,W,1,'#1c4f6b');
-  // reach ring
   var reach = reachOf(g);
   var rr = (reach/DMAX) * CHART_C.R;
   ctx.strokeStyle='#63d6a0'; ctx.setLineDash([5,5]); ctx.lineWidth=1;
   ctx.beginPath(); ctx.arc(CHART_C.x, CHART_C.y, Math.max(6,rr), Math.PI, 0); ctx.stroke();
   ctx.setLineDash([]);
-  // home
   px(CHART_C.x-4, CHART_C.y-4, 8, 8, '#eef4ff');
-  // targets
+  var shown = 0;
   for(var i=0;i<g.targets.length;i++){
     var t=g.targets[i];
-    if(t.done) continue;
+    if(t.done || !t.revealed) continue;
+    shown++;
     var p=chartPos(t.lane, t.dist);
     var within = t.dist <= reach;
     ctx.fillStyle = t.big ? (within?'#ffd34d':'#b39a55') : (within?'#bfe9ff':'#6f93ad');
@@ -461,10 +544,90 @@ function drawChart(){
   }
   ctx.fillStyle='#eef4ff'; ctx.font='12px ui-monospace,monospace';
   ctx.fillText('CHART  reach '+Math.round(reach)+'u', 14, 24);
+  ctx.fillStyle='#9fd0e8'; ctx.font='9px ui-monospace,monospace';
+  ctx.fillText('towers sighted: '+g.towers, 14, 40);
   ctx.fillStyle='#cfe4f2'; ctx.font='10px ui-monospace,monospace';
   ctx.fillText(g.msg, 14, H-12);
   ctx.fillStyle='#9fb8cc';
-  ctx.fillText('tap an island to set a heading', 14, H-30);
+  ctx.fillText(shown? 'tap an island to set a heading' : 'no island in sight', 14, H-30);
+}
+
+/* ---- island: text-adventure day loop ---- */
+var ISLE_BTNS = {
+  forage: {x:12,  y:H-116, w:104, h:40, label:'FORAGE',  sub:'food+water'},
+  timber: {x:128, y:H-116, w:104, h:40, label:'TIMBER',  sub:'repair mat'},
+  explore:{x:244, y:H-116, w:104, h:40, label:'EXPLORE', sub:'find tower'},
+  day:    {x:12,  y:H-66,  w:150, h:44, label:'NEXT DAY', sub:''},
+  sail:   {x:198, y:H-66,  w:150, h:44, label:'SET SAIL', sub:''}
+};
+function wrapText(s, maxc){
+  var words = String(s).split(' ');
+  var lines = [], cur = '';
+  for(var i=0;i<words.length;i++){
+    var w = words[i];
+    if(!cur.length) cur = w;
+    else if((cur + ' ' + w).length <= maxc) cur += ' ' + w;
+    else { lines.push(cur); cur = w; }
+  }
+  if(cur.length) lines.push(cur);
+  return lines;
+}
+function drawBtn(b, on){
+  px(b.x, b.y, b.w, b.h, '#04223a');
+  px(b.x+2, b.y+2, b.w-4, b.h-4, on ? '#1f6288' : '#1b3a4d');
+  ctx.fillStyle = on ? '#eaf4ff' : '#8fb0c4';
+  ctx.font = '12px ui-monospace,monospace';
+  var tw = ctx.measureText(b.label).width;
+  ctx.fillText(b.label, Math.round(b.x + (b.w-tw)/2), b.y + (b.sub?20:27));
+  if(b.sub){
+    ctx.font='8px ui-monospace,monospace';
+    var sw = ctx.measureText(b.sub).width;
+    ctx.fillStyle = on ? '#9fd0e8' : '#67839a';
+    ctx.fillText(b.sub, Math.round(b.x+(b.w-sw)/2), b.y+32);
+  }
+}
+function drawIslandScene(){
+  px(0,0,W,H,'#0e1f2a');
+  px(0,0,W,96,'#12293a');
+  var is = g.isle;
+  var day = is?is.day:1, acts = is?is.actions:0;
+  ctx.fillStyle='#eaf4ff'; ctx.font='13px ui-monospace,monospace';
+  ctx.fillText(is?is.name:'ISLAND', 12, 24);
+  ctx.fillStyle='#9fd0e8'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText('DAY '+day, 12, 44);
+  ctx.fillText('FOOD '+Math.round(g.food)+'   WATER '+Math.round(g.water), 74, 44);
+  ctx.fillText('ACTIONS', 12, 64);
+  for(var i=0;i<ACTIONS_PER_DAY;i++){
+    var on = i < acts;
+    px(74+i*15, 55, 12, 10, on?'#7fe0a0':'#274b60');
+  }
+  ctx.fillStyle='#8fb0c4'; ctx.font='9px ui-monospace,monospace';
+  ctx.fillText('MAT '+g.materials+'   TOWERS '+g.towers, 12, 84);
+
+  // wrapped log, newest at the bottom
+  var maxc = 52;
+  var lines = [];
+  if(is){ for(var k=0;k<is.log.length;k++){ var wl = wrapText(is.log[k], maxc); for(var q=0;q<wl.length;q++) lines.push(wl[q]); } }
+  var rowH = 13, top = 106, bottom = H-124;
+  var maxLines = Math.floor((bottom-top)/rowH);
+  if(lines.length > maxLines) lines = lines.slice(lines.length-maxLines);
+  ctx.font='10px ui-monospace,monospace';
+  for(var r=0;r<lines.length;r++){
+    var fade = (r < 2 && lines.length > maxLines) ? 0.45 : 1;
+    ctx.globalAlpha = fade;
+    var isLast = (r === lines.length-1);
+    ctx.fillStyle = isLast ? '#eaf4ff' : '#9fc2d6';
+    ctx.fillText(lines[r], 12, top + r*rowH);
+    ctx.globalAlpha = 1;
+  }
+
+  var noActs = acts <= 0;
+  drawBtn(ISLE_BTNS.forage, !noActs);
+  drawBtn(ISLE_BTNS.timber, !noActs);
+  drawBtn(ISLE_BTNS.explore, !noActs);
+  drawBtn({x:ISLE_BTNS.day.x,  y:ISLE_BTNS.day.y,  w:ISLE_BTNS.day.w,  h:ISLE_BTNS.day.h,  label:'NEXT DAY', sub:''}, noActs);
+  var canSail = true;
+  drawBtn({x:ISLE_BTNS.sail.x, y:ISLE_BTNS.sail.y, w:ISLE_BTNS.sail.w, h:ISLE_BTNS.sail.h, label:'SET SAIL', sub:''}, canSail);
 }
 
 function ctext(s, y, col, font){
@@ -476,54 +639,8 @@ function drawOver(){
   px(0,0,W,H,'#123a52'); drawSea();
   ctext(g.won?'YOU MADE THE BIG LAND':'THE SEA WON', H*0.40, g.won?'#c8ffd8':'#ffb0a0','16px ui-monospace,monospace');
   ctext(g.msg, H*0.48, '#eef4ff');
-  ctext('legs made: '+g.legs+'   raft left: '+Math.round(g.integrity), H*0.54, '#eef4ff');
+  ctext('legs made: '+g.legs+'   towers: '+g.towers+'   raft left: '+Math.round(g.integrity), H*0.54, '#eef4ff');
   ctext('tap or press ENTER to sail again', H*0.62, '#cfe4f2');
-}
-
-var SAIL_BTN = { x:W/2-56, y:H-52, w:112, h:28 };
-function isleNodeCol(kind){
-  if(kind==='food') return '#6fcf6f';
-  if(kind==='water') return '#5fa8ff';
-  if(kind==='mat') return '#c98b4b';
-  return '#e0d3a6';
-}
-function drawIslandScene(){
-  px(0,0,W,H,'#2a84ac');
-  for(var y=0;y<H;y+=20) px(0,y,W,1,'#3d9bc4');
-  ctx.fillStyle='#e6d3a3';
-  ctx.beginPath(); ctx.arc(W/2, H*0.44, 140, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle='#3f8a68';
-  ctx.beginPath(); ctx.arc(W/2, H*0.43, 122, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle='#357d5e';
-  ctx.beginPath(); ctx.arc(W/2-26, H*0.38, 60, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle='#2f7154';
-  ctx.beginPath(); ctx.arc(W/2+34, H*0.50, 40, 0, Math.PI*2); ctx.fill();
-  var is = g.island;
-  if(is){
-    for(var i=0;i<is.nodes.length;i++){
-      var nd=is.nodes[i];
-      if(nd.taken) ctx.globalAlpha=0.25;
-      px(nd.x-7, nd.y-7, 14, 14, '#04223a');
-      px(nd.x-5, nd.y-5, 10, 10, isleNodeCol(nd.kind));
-      px(nd.x-1, nd.y-8, 2, 16, '#04223a');
-      ctx.globalAlpha=1;
-    }
-    px(is.px-5, is.py-13, 10, 10, '#eef1fa');
-    px(is.px-6, is.py-3, 12, 12, '#e0705a');
-    px(is.px-3, is.py-15, 6, 4, '#3a3f52');
-  }
-  px(SAIL_BTN.x, SAIL_BTN.y, SAIL_BTN.w, SAIL_BTN.h, '#04223a');
-  px(SAIL_BTN.x+2, SAIL_BTN.y+2, SAIL_BTN.w-4, SAIL_BTN.h-4, '#2a6d90');
-  ctext('SET SAIL', SAIL_BTN.y+19, '#eef4ff','12px ui-monospace,monospace');
-  ctx.globalAlpha = 0.42; px(6,8,182,92,'#04223a'); ctx.globalAlpha = 1;
-  bar(12,20,110,g.food/140,'#6fcf6f','FOOD '+Math.round(g.food));
-  bar(12,40,110,g.water/140,'#5fa8ff','WATER '+Math.round(g.water));
-  bar(12,60,110,g.integrity/100,'#e0705a','RAFT '+Math.round(g.integrity));
-  ctx.fillStyle='#ffffff'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText('LEGS '+g.legs+(g.materials?('   MAT '+g.materials):''), 12, 84);
-  ctx.globalAlpha = 0.42; px(6,H-70,W-12,16,'#04223a'); ctx.globalAlpha = 1;
-  ctx.fillStyle='#eaf4ff'; ctx.font='10px ui-monospace,monospace';
-  ctx.fillText(g.msg, 12, H-58);
 }
 
 function render(){
@@ -538,7 +655,6 @@ function step(t){
   var dt = Math.min(0.05, (t-last)/1000);
   last=t;
   tickChart(g, dt);
-  tickIsland(g, dt);
   tickSail(g, dt);
   render();
   requestAnimationFrame(step);
@@ -572,9 +688,9 @@ function onMove(e){
 function pickChart(p){
   for(var i=0;i<g.targets.length;i++){
     var t=g.targets[i];
-    if(t.done) continue;
+    if(t.done || !t.revealed) continue;
     var c=chartPos(t.lane, t.dist);
-    if(Math.abs(p.x-c.x) < 22 && Math.abs(p.y-c.y) < 20){ chooseTarget(g, i); return true; }
+    if(Math.abs(p.x-c.x) < 24 && Math.abs(p.y-c.y) < 22){ chooseTarget(g, i); return true; }
   }
   return false;
 }
@@ -586,9 +702,11 @@ function onUp(e){
   if(moved > 16) return;
   if(g.scene==='chart'){ pickChart(p); return; }
   if(g.scene==='island'){
-    if(hit(p, SAIL_BTN)){ leaveIsland(g); return; }
-    var is=g.island;
-    if(is){ is.tx=clamp(p.x, 30, W-30); is.ty=clamp(p.y, H*0.20, H*0.62); }
+    if(hit(p, ISLE_BTNS.forage)){ actForage(g); return; }
+    if(hit(p, ISLE_BTNS.timber)){ actTimber(g); return; }
+    if(hit(p, ISLE_BTNS.explore)){ actExplore(g); return; }
+    if(hit(p, ISLE_BTNS.day)){ endDay(g); return; }
+    if(hit(p, ISLE_BTNS.sail)){ leaveIsland(g); return; }
     return;
   }
   if(g.scene==='sail'){
@@ -629,13 +747,14 @@ window.__game = {
   steer: (v) => { g.steer = v; return g; },
   heading: () => g.heading,
   rifts: () => g.rifts,
-  planRifts: (d) => planRifts(g, d),
   canLand: () => canLand(g),
   land: () => doLandfall(g),
-  island: () => g.island,
-  tickIsland: (dt) => { tickIsland(g, dt); return g; },
+  isle: () => g.isle,
+  forage: () => actForage(g),
+  timber: () => actTimber(g),
+  explore: () => actExplore(g),
+  endDay: () => endDay(g),
   leaveIsland: () => leaveIsland(g),
-  walk: (x,y) => { if(g.island){ g.island.tx=x; g.island.ty=y; } return g.island; },
   integrity: () => g.integrity,
   chartPos: (l,d) => chartPos(l,d),
   pickChart: (x,y) => pickChart({x:x,y:y})
