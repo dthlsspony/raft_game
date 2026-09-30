@@ -101,7 +101,8 @@ function genIslandRGBA(o){
     for(var gx=0; gx<GW; gx++){
       var pxs = Math.min(W-1, Math.round(gx*(W-1)/(GW-1)));
       var pys = Math.min(H-1, Math.round(gy*(H-1)/(GH-1)));
-      grid[gy*GW+gx] = height[pys*W+pxs] > sea ? 1 : 0;
+      var hi = pys*W+pxs;
+      grid[gy*GW+gx] = (height[hi] > sea && biome[hi] !== GEN.BIOME.SNOW) ? 1 : 0;
     }
   }
   return { topdown:{ data:top, w:W, h:H }, side:side, land:{ grid:grid, gw:GW, gh:GH } };
