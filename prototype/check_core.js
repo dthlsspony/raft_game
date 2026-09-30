@@ -413,5 +413,28 @@ C.setSail(g);
 C.chooseTarget(g, 1);
 ok('choosing a heading leaves the island behind', g.scene==='sail' && g.isle===null, g.scene);
 
+/* 20 island art: with a mask-backed land test every node must sit on
+   land, and the beach must be a real shore. This is the shape the page
+   feeds in (alpha grid of Yoichi's top-down render), so the shipped
+   branch is the tested branch. */
+const crescentLike = (x,y)=>{
+  const dx=(x-0.5)/0.44, dy=(y-0.47)/0.45;
+  if(dx*dx+dy*dy>1) return false;
+  const bx=(x-0.80)/0.34, by=(y-0.28)/0.34;   // a bay bitten out of the NE
+  return bx*bx+by*by > 1;
+};
+[1,2,3,5,7,42,99,777,4242].forEach(seed=>{
+  const q = C.makeIsleGraph(seed, crescentLike);
+  const off = q.nodes.filter(n=>!crescentLike(n.x,n.y));
+  ok('mask seed '+seed+': every node sits on land', off.length===0, JSON.stringify(off));
+  ok('mask seed '+seed+': the shore is on land', crescentLike(q.nodes[0].x, q.nodes[0].y));
+  const onLand = C.isleHops(q.adj,0).every(h=> h>=0);
+  ok('mask seed '+seed+': the net stays connected', onLand);
+});
+ok('a masked net is deterministic per seed',
+   JSON.stringify(C.makeIsleGraph(4242, crescentLike).nodes)===JSON.stringify(C.makeIsleGraph(4242, crescentLike).nodes));
+ok('the default shape is unchanged by the mask code path',
+   JSON.stringify(C.makeIsleGraph(4242).nodes)===JSON.stringify(C.makeIsleGraph(4242, undefined).nodes));
+
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);

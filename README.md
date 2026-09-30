@@ -55,9 +55,10 @@ docks, `R` repairs, `E` sets sail, `enter` restarts.
 
 ## Next
 
-- Wire the real island silhouette once the height-field fork is answered
-  (side/profile view vs top-down only). The behind-the-raft view is now the
-  shape the feel-test wants, so the real one should slot straight in.
+- The island screen now draws a real top-down render (Yoichi's height-field
+  mesh, embedded so the bundle stands alone) instead of the drawn blob. The
+  dots are placed against the render's own land mask, so none float in the
+  sea. Side/profile view for the sail screen is still open.
 - Port the new behind-the-raft view + touch controls into `godot/` (the
   Godot cut is still the old side-on keyboard build).
 - Then the platform layer: Godot SDK for yandex.games / vk.games, and later
