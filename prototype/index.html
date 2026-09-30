@@ -2443,7 +2443,7 @@ function drawTargetIsland(){
     }
     var fog = clamp((t.dist-80)/900, 0, 0.75);
     var spr = sideSpriteFor(t);
-    if(spr && spr.complete && spr.naturalWidth){
+    if(spr && spr.cv && spr.cv.width){
       drawSideSprite(spr, x, y, wdt, fog);
     } else {
       drawIslandSil(x, y, wdt, t.big, fog);
