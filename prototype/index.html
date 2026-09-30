@@ -1522,7 +1522,33 @@ function classifyTerrain(height, water, W, H, opts = {}) {  const {
       if (bestN >= 6) filtered[i] = best;
     }
   }
-  return filtered;
+  // Убираем одиночные «соль/перец» пиксели: если пиксель не совпадает ни с
+  // одним из 8 соседей, берём самый частый соседний биом.
+  const lone = Uint8Array.from(filtered);
+  const ncounts = new Int32Array(16);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      const b = filtered[i];
+      let isolated = true;
+      ncounts.fill(0);
+      for (let dy = -1; dy <= 1; dy++) {
+        const r = (y + dy) * W + x;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nb = filtered[r + dx];
+          if (nb === b) isolated = false;
+          ncounts[nb]++;
+        }
+      }
+      if (isolated) {
+        let bb = b, bn = 0;
+        for (let bId = 0; bId < 16; bId++) { if (ncounts[bId] > bn) { bn = ncounts[bId]; bb = bId; } }
+        lone[i] = bb;
+      }
+    }
+  }
+  return lone;
 }
 
 // ---------------------------------------------------------------- палитры
@@ -1960,7 +1986,9 @@ function genIslandRGBA(o){
     for(var gx=0; gx<GW; gx++){
       var pxs = Math.min(W-1, Math.round(gx*(W-1)/(GW-1)));
       var pys = Math.min(H-1, Math.round(gy*(H-1)/(GH-1)));
-      grid[gy*GW+gx] = height[pys*W+pxs] > sea ? 1 : 0;
+      var hi = pys*W+pxs;
+      /* walkable = land that is not a snow cap; the white peaks are impassable */
+      grid[gy*GW+gx] = (height[hi] > sea && biome[hi] !== GEN.BIOME.SNOW) ? 1 : 0;
     }
   }
   return { topdown:{ data:top, w:W, h:H }, side:side, land:{ grid:grid, gw:GW, gh:GH } };
@@ -2411,11 +2439,12 @@ function drawSideSprite(img, x, baseY, wdt, fog){
   var a = clamp(1 - fog*0.80, 0.15, 1);
   var base = baseY + 2;                     /* settle it a touch into the sea */
   ctx.save();
-  /* a soft mirrored reflection so the base does not read as a pasted cut */
+  /* a soft mirrored reflection below the waterline so the base does not
+     read as a pasted cut (dy = -h/2 under scale(1,-1) puts it under, not over) */
   ctx.globalAlpha = a*0.20;
   ctx.save();
   ctx.translate(x, base); ctx.scale(1, -1);
-  ctx.drawImage(img.cv, -wdt/2, 0, wdt, h*0.5);
+  ctx.drawImage(img.cv, -wdt/2, -h*0.5, wdt, h*0.5);
   ctx.restore();
   ctx.globalAlpha = a;
   ctx.drawImage(img.cv, x - wdt/2, base - h, wdt, h);
