@@ -6,10 +6,11 @@ const core = m[1];
 
 const fn = new Function(core + `
   return {newGame, reachOf, chooseTarget, tickSail, tickChart, leaveIsland, backToChart,
-          clamp, DMAX, BASE_SPEED, planRifts, canLand, doLandfall, makeIsle,
+          clamp, wrapH, WRAP_H, DMAX, BASE_SPEED, planRifts, canLand, doLandfall, makeIsle,
           moveTo, runNode, endDay, revealFromTower, ensureDestinations,
           makeIsleGraph, isleHops, bearingWord,
-          gatherHere, doGather, setSail, returnToIsland,
+          gatherHere, doGather, setSail, returnToIsland, repairRaft, REPAIR_PER,
+          armRaft, ARM_COST, KRAKEN_DMG, KRAKEN_HIT, worldDist,
           ACTIONS_PER_DAY, DAY_FOOD, DAY_WATER,
           LAND_RANGE, RIFT_KEEPOUT, RIFT_HIT};
 `);
@@ -199,8 +200,7 @@ refill(g);
 C.gatherHere(g);
 ok('a grove feeds you when you stand and gather', g.food > fBefore, g.food+' vs '+fBefore);
 
-/* 6e rocks give materials when you work them */
-g = C.newGame(5); landAt(g,0);
+/* 6e rocks give materials when you work them */g = C.newGame(5); landAt(g,0);
 const tNear = nearestKind(g, ['timber']);
 ok('rocks exist on the net', tNear>=0);
 const mBefore = g.materials;
@@ -208,6 +208,34 @@ walkPath(g, pathTo(g, tNear));
 refill(g);
 C.gatherHere(g);
 ok('rocks give materials when you stand and gather', g.materials > mBefore, String(g.materials));
+
+/* 6e-2 lumber patches the raft: the material is the cost, not an action */
+g = C.newGame(5); landAt(g,0);
+const tRep = nearestKind(g, ['timber']);
+walkPath(g, pathTo(g, tRep));
+refill(g);
+C.gatherHere(g);
+const matsBefore = g.materials;
+g.integrity = 40;
+C.repairRaft(g);
+ok('repair spends exactly one lumber', g.materials === matsBefore-1, g.materials+' vs '+matsBefore);
+ok('repair raises the raft by REPAIR_PER', g.integrity === 40 + C.REPAIR_PER, String(g.integrity));
+
+g.integrity = 100; const mFull = g.materials;
+C.repairRaft(g);
+ok('a sound raft refuses repair and keeps the lumber', g.integrity===100 && g.materials===mFull);
+
+g.integrity = 50; g.materials = 0;
+C.repairRaft(g);
+ok('no lumber refuses repair and costs nothing', g.integrity===50 && g.materials===0);
+
+g.integrity = 95; g.materials = 3;
+C.repairRaft(g);
+ok('repair caps integrity at 100', g.integrity===100, String(g.integrity));
+
+g.scene='sail';
+C.repairRaft(g);
+ok('repair only works ashore', g.integrity===100 && g.materials===2, g.scene);
 
 /* 6f the tower is found by walking, and it sights islands */
 g = C.newGame(5); landAt(g,0);
@@ -322,14 +350,45 @@ ok('window is not on contact', g.targets[0].dist > 8, String(g.targets[0].dist))
 C.doLandfall(g);
 ok('tap lands: scene goes ashore', g.scene==='island' || g.scene==='win', g.scene);
 
-/* 13 landing the big land wins */
+/* 13 the last shore is guarded: unarmed is a repulse, armed is a landing */
 g = C.newGame(2);
 const bi = g.targets.findIndex(x=>x.big);
 g.target = bi; g.scene='sail'; g.heading=g.targets[bi].lane; g.dragging=true;
 g.targets[bi].dist = 40;
 ok('canLand true on the big land', C.canLand(g)===true);
+const integBefore = g.integrity;
 C.doLandfall(g);
-ok('landing the big land wins', g.scene==='win' && g.won===true, g.scene);
+ok('an unarmed approach is thrown back, not won', g.scene==='chart' && !g.won, g.scene+' won='+g.won);
+ok('the kraken costs hull', g.integrity < integBefore, integBefore+'->'+g.integrity);
+ok('the big land stays unvisited after a repulse', g.targets[bi].done === false);
+ok('the raft is pushed back off the shore', C.worldDist(g.raft.x,g.raft.y,g.targets[bi].wx,g.targets[bi].wy) > 100);
+
+/* armed, sound: the harpoon lands it */
+g.armed = true; g.integrity = 100;
+g.target = bi; g.scene='sail'; g.targets[bi].dist = 40;
+C.doLandfall(g);
+ok('an armed approach wins', g.scene==='win' && g.won===true, g.scene);
+
+/* armed but not patched: the fight still sinks you, so REPAIR matters */
+g = C.newGame(2);
+const bi2 = g.targets.findIndex(x=>x.big);
+g.target = bi2; g.scene='sail'; g.armed = true; g.integrity = 15; g.targets[bi2].dist = 40;
+C.doLandfall(g);
+ok('an armed but unpatched raft breaks within sight of land', g.scene==='over' && !g.won, g.scene);
+
+/* 13b arming: a one-time lumber spend, ashore only */
+g = C.newGame(1); landAt(g,0);
+g.materials = C.ARM_COST;
+const mat0 = g.materials;
+C.armRaft(g);
+ok('arming spends lumber and sets the flag', g.armed===true && g.materials===mat0-C.ARM_COST, g.materials+'');
+const mat1 = g.materials;
+C.armRaft(g);
+ok('arming twice does not spend again', g.armed===true && g.materials===mat1);
+
+g = C.newGame(1); landAt(g,0); g.materials = 0;
+C.armRaft(g);
+ok('cannot arm without lumber', g.armed===false);
 
 /* 14 off-lane tap still lands */
 g = C.newGame(1);
@@ -435,6 +494,31 @@ ok('a masked net is deterministic per seed',
    JSON.stringify(C.makeIsleGraph(4242, crescentLike).nodes)===JSON.stringify(C.makeIsleGraph(4242, crescentLike).nodes));
 ok('the default shape is unchanged by the mask code path',
    JSON.stringify(C.makeIsleGraph(4242).nodes)===JSON.stringify(C.makeIsleGraph(4242, undefined).nodes));
+
+/* 21 manual steering across the whole circle (Parent, 10-02: 'control is
+   weird, not turning left sometimes'). after a come-about the heading sits
+   outside [-1,1]; a drag clamped to [-1,1] snapped hard and then died on
+   one side. the drag now wraps, same space as the auto-helm. */
+ok('wrapH keeps a back-left heading left', C.wrapH(-2.5) < -1, String(C.wrapH(-2.5)));
+ok('wrapH keeps a back-right heading right', C.wrapH(2.5) > 1, String(C.wrapH(2.5)));
+ok('wrapH folds a full turn back to zero', Math.abs(C.wrapH(2*C.WRAP_H)) < 1e-9, String(C.wrapH(2*C.WRAP_H)));
+var hL = C.wrapH(-2.5 - 0.05);
+ok('a left drag past the old clamp keeps turning left', hL < -2.5, String(hL));
+var hR = C.wrapH(-2.5 + 0.05);
+ok('a right drag from back-left turns back toward ahead', hR > -2.5, String(hR));
+ok('a left drag from back-right keeps turning left', C.wrapH(2.718 - 0.05) > 2.6, String(C.wrapH(2.718-0.05)));
+
+/* 22 a fully-wrong starting heading still finds the island, every target */
+[0,1].forEach(function(ti){
+  const gg = C.newGame(7);
+  C.chooseTarget(gg, ti);
+  if(gg.scene!=='sail'){ ok('target '+ti+' is sighted', false, gg.scene); return; }
+  gg.heading = C.wrapH(gg.heading + C.WRAP_H);   // point fully opposite
+  gg.dragging = false; gg.steer = 0;
+  let st=0;
+  while(gg.scene==='sail' && st<200000){ C.tickSail(gg, 1/60); st++; }
+  ok('a fully-wrong heading still finds island '+ti, gg.scene==='island', gg.scene+' '+gg.msg);
+});
 
 console.log('\n'+pass+' passed, '+fail+' failed');
 process.exit(fail?1:0);

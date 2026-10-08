@@ -21,6 +21,13 @@ var DMAX = 1000;          // world units from horizon to the raft
 var BASE_SPEED = 25;      // units per second
 var DR_FOOD = 2.6, DR_WATER = 2.0;   // supply drain per second at sea
 var RIFT_DMG = 14, RIFT_COST = 5;
+/* the guarded horizon: the last shore is not free. An unarmed approach is
+   thrown back; a harpoon lashed to the mast is what turns the last leg from
+   a repulse into a landing. Both hits are heavy, so a raft you did not patch
+   first will not survive the fight that arming lets you win. */
+var KRAKEN_DMG = 34;      // hull lost when you come at it unarmed
+var KRAKEN_HIT = 22;      // hull lost even when armed
+var ARM_COST = 4;         // lumber to lash the harpoon
 var LAND_RANGE = 170;     // how close you can be and still tap to land
 var RIFT_KEEPOUT = 140;   // no rift in the landing approach
 var RIFT_HIT = 0.30;      // share this much of the rift's lane and it bites
@@ -46,7 +53,7 @@ var ISLE_KIND = {
   plain:  {label:'OPEN',   col:'#9fc2d6'},
   forage: {label:'GROVE',  col:'#7fe0a0'},
   water:  {label:'SPRING', col:'#7fc4ff'},
-  timber: {label:'ROCKS',  col:'#e0b070'},
+  timber: {label:'LUMBER', col:'#e0b070'},
   vantage:{label:'RIDGE',  col:'#d6c8ff'},
   tower:  {label:'TOWER',  col:'#ffd34d'}
 };
@@ -188,10 +195,52 @@ function makeIsleGraph(seed, landFn){
   for(var i9=0;i9<pool.length;i9++) nodes[pool[i9]].type = types[i9] || 'plain';
   nodes[nearFood].type='forage';
   nodes[nearWater].type='water';
+  // every resource dot is a finite larder: a grove runs out after a few
+  // gathers, so you cannot top your bags up from one point. drawn last so
+  // the stock does not disturb the seeded layout above.
+  for(var i10=0;i10<n;i10++){
+    var ty=nodes[i10].type;
+    if(ty==='forage')      { nodes[i10].cap = 2 + (rnd()<0.5?1:0); }
+    else if(ty==='water')  { nodes[i10].cap = 2 + (rnd()<0.5?1:0); }
+    else if(ty==='timber') { nodes[i10].cap = 2; }
+    else continue;
+    nodes[i10].stock = nodes[i10].cap;
+  }
   return {nodes:nodes, edges:edges, adj:adj, hops:hops, tower:tower, n:n};
 }
 
+/* how much an island can supply: count the resource dots. Used on the
+   chart before you have set foot there (estimate) and again from the
+   real graph the moment you land (truth). */
+var SUPPLY_CACHE = {};
+function supplyFromGraph(gr){
+  var c = {forage:0, water:0, timber:0, nodes:gr.n};
+  for(var i=0;i<gr.n;i++){ var k=gr.nodes[i].type; if(c[k]!==undefined) c[k]++; }
+  return c;
+}
+function supplyEstimate(seed){
+  seed = seed>>>0;
+  if(SUPPLY_CACHE[seed]) return SUPPLY_CACHE[seed];
+  var s = supplyFromGraph(makeIsleGraph(seed));
+  SUPPLY_CACHE[seed] = s;
+  return s;
+}
+/* the world is a flat plane: an island's lane+dist is a polar fix on it,
+   so its position never changes while the raft travels. Origin (0,0) is
+   the home island; north is +y. */
+function worldOf(lane, dist){
+  var a = lane*1.15;
+  return { x: Math.sin(a)*dist, y: Math.cos(a)*dist };
+}
+function worldDist(ax,ay,bx,by){ var dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
+
 function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+
+/* heading is a full circle, in units of 1.15 rad. keep it wrapped so manual
+   drag, keyboard steer and auto-helm all agree on the same space (else a
+   clamped manual drag dies on one side after a come-about; Parent, 10-02). */
+var WRAP_H = Math.PI/1.15;
+function wrapH(h){ return h - 2*WRAP_H*Math.round(h/(2*WRAP_H)); }
 
 function rngFactory(seed){
   var s = (seed>>>0) || 1;
@@ -225,20 +274,33 @@ function makeTargets(seed){
   // a field of islands, not three. A tower sighting of 1..3 only means
   // something when there is more out there to find.
   var N = 7;
+  // keep the islands spread out: a world-fixed chart with two blobs on top
+  // of each other reads as one island and clutters the labels. Resample any
+  // island that lands closer than ISLE_MINSEP to one already placed.
+  var ISLE_MINSEP = 165;
   for(var i=0;i<N;i++){
-    var lane;
-    if(i===0) lane = (rnd()*2-1)*0.5;          // one sits near the home heading
-    else lane = (rnd()*2-1)*0.85;
-    var dist = 240 + i*80 + rnd()*70;
-    var iseed = Math.floor(rnd()*1e9);
-    t.push({lane:lane, dist:dist, seed:iseed, big:false,
-            artId:iseed, revealed:false, done:false,
+    var lane, dist, iseed, wp, tries = 0, clear = false;
+    while(!clear && tries < 60){
+      if(i===0) lane = (rnd()*2-1)*0.5;          // one sits near the home heading
+      else lane = (rnd()*2-1)*0.85;
+      dist = 240 + i*80 + rnd()*70;
+      iseed = Math.floor(rnd()*1e9);
+      wp = worldOf(lane, dist);
+      clear = true;
+      for(var j=0;j<t.length;j++){
+        if(worldDist(wp.x, wp.y, t[j].wx, t[j].wy) < ISLE_MINSEP){ clear = false; break; }
+      }
+      tries++;
+    }
+    t.push({lane:lane, dist:dist, wx:wp.x, wy:wp.y, seed:iseed, big:false,
+            artId:iseed, revealed:false, done:false, sup:supplyEstimate(iseed),
             name:'ISLE '+String.fromCharCode(65+i)});
   }
   var blane = (rnd()*2-1)*0.45;
   var bseed = Math.floor(rnd()*1e9);
-  t.push({lane:blane, dist:950, seed:bseed, big:true,
-          artId:bseed, revealed:false, done:false, name:'THE BIG LAND'});
+  var bwp = worldOf(blane, 950);
+  t.push({lane:blane, dist:950, wx:bwp.x, wy:bwp.y, seed:bseed, big:true,
+          artId:bseed, revealed:false, done:false, sup:null, name:'THE BIG LAND'});
   // sort shallow-to-deep so the two nearest are the ones sighted from home
   t.sort((a,b)=> a.dist - b.dist);
   var shown = 0;
@@ -252,10 +314,11 @@ function newGame(seed){
     rnd:rngFactory(seed),
     scene:'chart',
     food:100, water:100, integrity:100, materials:0,
-    legs:0, towers:0,
+    legs:0, towers:0, armed:false,
     targets:makeTargets(seed),
     target:-1,
     heading:0, steer:0, dragging:false,
+    raft:{x:0,y:0},
     time:0,
     rifts:[],
     isle:null,
@@ -273,13 +336,17 @@ function chooseTarget(g, i){
   if(!t.revealed) { g.msg='you have not sighted that one yet'; return g; }
   g.target = i;
   try{ if(typeof requestIsland==='function') requestIsland(t.artId, true); }catch(e){}
-  g.heading = t.lane;
+  // the leg is measured from where the raft actually is, so an island
+  // keeps its world fix and the raft is the thing that moves.
+  var ldx = t.wx - g.raft.x, ldy = t.wy - g.raft.y;
+  t.dist = Math.sqrt(ldx*ldx + ldy*ldy);
+  g.heading = (t.dist>1e-6) ? wrapH(Math.atan2(ldx, ldy)/1.15) : wrapH(t.lane);
   g.scene = 'sail';
   g.isle = null;            // a chosen heading abandons the island for good
   g.time = 0;
   planRifts(g, t.dist);
   cue('heading');
-  g.msg = 'heading for ' + t.name;
+  g.msg = (t.big && !g.armed) ? 'heading for ' + t.name + '. the raft is unarmed.' : 'heading for ' + t.name;
   return g;
 }
 
@@ -320,6 +387,7 @@ function makeIsle(g, t){
   g.isle = {
     name: t.name,
     artId: t.artId,
+    seed: t.seed,
     day: 1,
     actions: ACTIONS_PER_DAY,
     at: 0,
@@ -328,6 +396,8 @@ function makeIsle(g, t){
     graph: gr,
     log: []
   };
+  // the chart's estimate becomes the truth now that the real net exists
+  t.sup = supplyFromGraph(gr);
   say(g, 'You come ashore at ' + t.name + '.');
   say(g, 'Day 1. ' + ACTIONS_PER_DAY + ' actions before dark.');
   say(g, gr.n + ' places on this island, all linked. The rest are unknown.');
@@ -355,6 +425,7 @@ function revealFromTower(g){
   } else if(bigIdx>=0 && !g.targets[bigIdx].revealed){
     g.targets[bigIdx].revealed = true;
     out.push(g.targets[bigIdx].name);
+    say(g, 'The big land, on the skyline at last. Something huge turns over in the water around it.');
   }
   try{ if(typeof requestIsland==='function'){ for(i=0;i<g.targets.length;i++){ var tt=g.targets[i]; if(tt.revealed) requestIsland(tt.artId); } } }catch(e){}
   return out;
@@ -380,7 +451,7 @@ function runNode(g, idx){
   } else if(kind==='water'){
     say(g, 'A spring under the ferns. Stand and GATHER.');
   } else if(kind==='timber'){
-    say(g, 'Broken rock and deadfall. Stand and GATHER.');
+    say(g, 'Fallen trunks and dry deadwood. Stand and GATHER.');
   } else if(kind==='vantage'){
     if(is.tower){
       say(g, 'From the ridge the sighted chart reads plain.');
@@ -431,20 +502,25 @@ function moveTo(g, idx){
 function doGather(g, kind){
   var is = g.isle, node = is.graph.nodes[is.at];
   node.seen = true;
+  if(typeof node.stock !== 'number') node.stock = 1;   // safety for old shapes
+  var last = (node.stock <= 1);
   if(kind==='forage'){
-    var f = 10 + Math.floor(g.rnd()*7), w = 4 + Math.floor(g.rnd()*5);
+    var f = 8 + Math.floor(g.rnd()*6), w = 3 + Math.floor(g.rnd()*4);
     g.food = Math.min(200, g.food + f);
     g.water = Math.min(200, g.water + w);
-    say(g, 'You work the grove. food +' + f + ', water +' + w + '.');
+    node.stock--;
+    say(g, 'You work the grove. food +' + f + ', water +' + w + '.' + (last ? ' The grove is picked clean.' : ' It will give once more.'));
   } else if(kind==='water'){
-    var w2 = 10 + Math.floor(g.rnd()*7), f2 = 2 + Math.floor(g.rnd()*4);
+    var w2 = 8 + Math.floor(g.rnd()*6), f2 = 2 + Math.floor(g.rnd()*3);
     g.water = Math.min(200, g.water + w2);
     g.food = Math.min(200, g.food + f2);
-    say(g, 'You fill up at the spring. water +' + w2 + ', food +' + f2 + '.');
+    node.stock--;
+    say(g, 'You fill up at the spring. water +' + w2 + ', food +' + f2 + '.' + (last ? ' The spring runs dry.' : ' It will give once more.'));
   } else if(kind==='timber'){
     var m = 2 + Math.floor(g.rnd()*3);
     g.materials += m;
-    say(g, 'You break off rock and deadfall. materials +' + m + '.');
+    node.stock--;
+    say(g, 'You cut the deadwood into lumber. lumber +' + m + '.' + (last ? ' Nothing useful left here.' : ' It will give once more.'));
   }
   cue('gather', kind);
   return g;
@@ -457,12 +533,45 @@ function gatherHere(g){
   var is = g.isle, node = is.graph.nodes[is.at];
   var kind = node ? node.type : '';
   if(kind!=='forage' && kind!=='water' && kind!=='timber'){
-    say(g, 'Nothing to gather here. Walk to a grove, a spring or the rocks.');
+    say(g, 'Nothing to gather here. Walk to a grove, a spring or the deadwood.');
+    return g;
+  }
+  if(typeof node.stock === 'number' && node.stock<=0){
+    say(g, 'This spot is worked out. Nothing left to gather.');
     return g;
   }
   if(is.actions<=0){ say(g, 'No actions left today. Make camp.'); return g; }
   is.actions--;
   return doGather(g, kind);
+}
+
+/* patch the raft with the lumber you cut. The material is the cost, not an
+   action: the island loop already prices walking and gathering. */
+var REPAIR_PER = 20;
+function repairRaft(g){
+  if(g.scene!=='island' || !g.isle){ say(g, 'You can only patch the raft ashore.'); return g; }
+  if(g.integrity>=100){ say(g, 'The raft is sound. Nothing to patch.'); return g; }
+  if(g.materials<=0){ say(g, 'No lumber to patch with. Cut LUMBER on the island.'); return g; }
+  g.materials--;
+  var before = Math.round(g.integrity);
+  g.integrity = Math.min(100, g.integrity + REPAIR_PER);
+  say(g, 'You patch the logs. raft ' + before + ' -> ' + Math.round(g.integrity) + '. lumber left ' + g.materials + '.');
+  cue('gather','timber');
+  return g;
+}
+
+/* lash a barbed harpoon to the mast: the last shore is guarded, and this is
+   the one thing that makes the last leg survivable. Lumber is the cost, the
+   same material REPAIR spends, so arming and patching compete for the holds. */
+function armRaft(g){
+  if(g.scene!=='island' || !g.isle){ say(g, 'You can only lash the harpoon ashore.'); return g; }
+  if(g.armed){ say(g, 'The harpoon is already lashed to the mast.'); return g; }
+  if(g.materials < ARM_COST){ say(g, 'A harpoon needs ' + ARM_COST + ' lumber lashed to the mast. You have ' + g.materials + '.'); return g; }
+  g.materials -= ARM_COST;
+  g.armed = true;
+  say(g, 'You lash a barbed harpoon to the mast and stack spare shafts by the tiller. The raft is armed.');
+  cue('arm');
+  return g;
 }
 
 /* Leaving is one tap. SET SAIL drops you on the chart to pick a heading,
@@ -509,14 +618,40 @@ function doLandfall(g){
   if(g.scene!=='sail') return g;
   var t = g.targets[g.target];
   if(!t){ backToChart(g); return g; }
-  t.done = true;
-  g.legs++;
   if(t.big){
+    if(!g.armed){
+      /* the kraken turns an unarmed arrival into a repulse: hull damage and
+         thrown back out to sea, the raft kept off the shore so the next try
+         is another full leg, not a loop on the doorstep. */
+      g.integrity = clamp(g.integrity - KRAKEN_DMG, 0, 100);
+      g.hitFlash = 0.5;
+      cue('kraken');
+      if(g.integrity<=0){ g.scene='over'; g.ended=true; g.won=false; g.msg='the kraken smashed the raft to splinters at the last shore'; cue('lose'); return g; }
+      var rx = g.raft.x - t.wx, ry = g.raft.y - t.wy, rl = Math.sqrt(rx*rx+ry*ry) || 1;
+      g.raft.x = t.wx + rx/rl*260; g.raft.y = t.wy + ry/rl*260;
+      g.scene='chart'; g.target=-1; g.rifts=[]; g.isle=null;
+      g.msg = 'a kraken rose from the black water and hurled the raft back. arm yourself, then come again.';
+      return g;
+    }
+    /* armed: the harpoon lands and it slides under, but the fight still costs
+       the hull. A raft you never patched can break within sight of land. */
+    g.integrity = clamp(g.integrity - KRAKEN_HIT, 0, 100);
+    g.hitFlash = 0.35;
+    cue('kraken');
+    if(g.integrity<=0){ g.scene='over'; g.ended=true; g.won=false; g.msg='the raft broke under the kraken within sight of land'; cue('lose'); return g; }
+    t.done = true;
+    g.legs++;
+    g.raft.x = t.wx; g.raft.y = t.wy;
     g.scene='win'; g.won=true; g.ended=true;
-    g.msg='you reached the big land';
+    g.msg='the harpoon found it, and it slid back under. you reached the big land.';
     cue('win');
     return g;
   }
+  t.done = true;
+  g.legs++;
+  // step the raft onto the island: the next leg starts from here, so the
+  // chart keeps every island where it was.
+  g.raft.x = t.wx; g.raft.y = t.wy;
   cue('land');
   makeIsle(g, t);
   g.scene = 'island';
@@ -559,8 +694,19 @@ function tickSail(g, dt){
   var t = g.targets[g.target];
   if(!t){ backToChart(g); return g; }
 
-  if(g.steer) g.heading = clamp(g.heading + g.steer*1.15*dt, -1, 1);
-  else if(!g.dragging) g.heading = g.heading * Math.max(0, 1 - 0.9*dt);
+  var bdx = t.wx - g.raft.x, bdy = t.wy - g.raft.y;
+  var desired = (Math.abs(bdx)+Math.abs(bdy) > 1e-6) ? (Math.atan2(bdx, bdy)/1.15) : g.heading;
+  /* nav bug (Parent, 10-02): leave island A, head for B, and once B drifted
+     dead astern the target bearing sat on the +-pi seam. atan2 flipped sign
+     every frame around it, the two asks cancelled, and the raft flew straight
+     on, lost. So steer by the WRAPPED relative angle: pick the short way
+     around the target, keep that sign, and let the heading swing the whole
+     way (a come-about) when the island is behind. No per-frame cancel. */
+  var WRAP = WRAP_H;
+  var rel = desired - g.heading;
+  rel = rel - 2*WRAP*Math.round(rel/(2*WRAP));
+  if(g.steer) g.heading = wrapH(g.heading + g.steer*1.15*dt);
+  else if(!g.dragging) g.heading = wrapH(g.heading + rel*Math.min(1, 0.9*dt));
 
   g.food  = Math.max(0, g.food  - DR_FOOD*dt);
   g.water = Math.max(0, g.water - DR_WATER*dt);
@@ -570,7 +716,10 @@ function tickSail(g, dt){
     return g;
   }
 
-  t.dist -= BASE_SPEED*dt;
+  var hang = g.heading*1.15;
+  g.raft.x += Math.sin(hang)*BASE_SPEED*dt;
+  g.raft.y += Math.cos(hang)*BASE_SPEED*dt;
+  t.dist = worldDist(g.raft.x, g.raft.y, t.wx, t.wy);
 
   g.time += dt;
   for(var i=g.rifts.length-1;i>=0;i--){
@@ -2125,25 +2274,70 @@ function toWorld(p){ return { x:(p.x-VIEW.x)/VIEW.z, y:(p.y-VIEW.y)/VIEW.z }; }
 function sceneIsMap(){ return g.scene==='chart' || g.scene==='island'; }
 var KEYS = {};
 var g = newGame(12345);
+g.scene = 'menu';
 primeIslandArt();
 var last = 0;
 
 /* ---- sound: one WebAudio layer, no assets. The context is created and
    resumed inside the first real gesture, so autoplay policy passes.
    Every node call is guarded, so headless runs and sims stay silent. */
-var AU = { ctx:null, ok:false };
+var AU = { ctx:null, ok:false, sfxGain:null, musicGain:null, vol:{music:0.45, sfx:0.8}, musicOn:false };
+function applyVolumes(){
+  if(!AU.ctx) return;
+  try{
+    if(AU.sfxGain) AU.sfxGain.gain.value = AU.vol.sfx;
+    if(AU.musicGain) AU.musicGain.gain.value = AU.musicOn ? AU.vol.music : 0;
+  }catch(e){}
+}
 function audioArm(){
   try{
     if(!AU.ctx){
       var AC = window.AudioContext || window.webkitAudioContext;
       if(!AC) return AU;
       AU.ctx = new AC();
+      AU.sfxGain = AU.ctx.createGain();
+      AU.musicGain = AU.ctx.createGain();
+      AU.sfxGain.connect(AU.ctx.destination);
+      AU.musicGain.connect(AU.ctx.destination);
+      applyVolumes();
     }
     if(AU.ctx.state === 'suspended') AU.ctx.resume();
     AU.ok = true;
   }catch(e){ AU.ok = false; }
   return AU;
 }
+/* a slow procedural pad: no audio assets, just a calm four-chord loop
+   under the game. Routed through its own gain so OPTIONS can fade it. */
+var MUSIC = { timer:null, beat:0 };
+var MUSIC_CHORDS = [[220,277.18,329.63],[196,246.94,293.66],[174.61,220,261.63],[196,246.94,329.63]];
+function toneM(freq, dur, type, vol){
+  try{
+    if(!AU.ok || !AU.ctx || !AU.musicGain) return;
+    var c = AU.ctx, t0 = c.currentTime;
+    var o = c.createOscillator(), gn = c.createGain();
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(freq, t0);
+    gn.gain.setValueAtTime(0.0001, t0);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), t0+0.5);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+    o.connect(gn); gn.connect(AU.musicGain);
+    o.start(t0); o.stop(t0+dur+0.05);
+  }catch(e){}
+}
+function musicStart(){
+  if(!AU.ok || !AU.ctx) return;
+  AU.musicOn = true; applyVolumes();
+  if(MUSIC.timer) return;
+  MUSIC.timer = setInterval(()=>{
+    if(!AU.ok || !AU.ctx || !AU.musicOn) return;
+    var ch = MUSIC_CHORDS[Math.floor(MUSIC.beat/4) % MUSIC_CHORDS.length];
+    var f = ch[MUSIC.beat % ch.length];
+    toneM(f, 2.8, 'sine', 0.10);
+    if(MUSIC.beat % 2 === 0) toneM(f*1.4983, 2.8, 'triangle', 0.045);
+    MUSIC.beat++;
+  }, 1500);
+}
+function musicStop(){ AU.musicOn = false; applyVolumes(); }
 function tone(freq, dur, type, vol, slideTo, delay){
   try{
     if(!AU.ok || !AU.ctx) return;
@@ -2156,7 +2350,7 @@ function tone(freq, dur, type, vol, slideTo, delay){
     gn.gain.setValueAtTime(0.0001, t0);
     gn.gain.exponentialRampToValueAtTime(v, t0+0.008);
     gn.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
-    o.connect(gn); gn.connect(c.destination);
+    o.connect(gn); gn.connect(AU.sfxGain || c.destination);
     o.start(t0); o.stop(t0+dur+0.02);
   }catch(e){}
 }
@@ -2170,7 +2364,7 @@ function noiseBurst(dur, vol, delay){
     for(var i=0;i<n;i++) d[i] = (Math.random()*2-1) * (1 - i/n);
     var s = c.createBufferSource(); s.buffer = buf;
     var gn = c.createGain(); gn.gain.value = (vol===undefined?0.10:vol);
-    s.connect(gn); gn.connect(c.destination); s.start(t0);
+    s.connect(gn); gn.connect(AU.sfxGain || c.destination); s.start(t0);
   }catch(e){}
 }
 var sfx = {
@@ -2183,6 +2377,8 @@ var sfx = {
   sail:    () => { noiseBurst(0.35, 0.06); tone(180,0.4,'sawtooth',0.05,90); },
   land:    () => { tone(90,0.18,'triangle',0.10,60); noiseBurst(0.18,0.08); },
   night:   () => { tone(300,0.5,'sine',0.05,180); },
+  arm:     () => { tone(320,0.07,'square',0.06); tone(150,0.14,'triangle',0.07,0,0.06); },
+  kraken:  () => { tone(64,0.8,'sawtooth',0.09,42); noiseBurst(0.55,0.10); },
   lose:    () => { tone(200,0.9,'sawtooth',0.07,60); },
   win:     () => { tone(523,0.12,'square',0.07); tone(659,0.12,'square',0.07,0,0.12); tone(784,0.25,'square',0.07,0,0.24); }
 };
@@ -2289,7 +2485,47 @@ function drawFarIslands(){
 }
 
 /* ---- sea ---- */
+/* One travelling swell field. sc<1 is far water (long, slow, small); sc=1 is
+   the near surface the raft actually rides. Pure in x and t, so the sea, the
+   raft, the wake and the spray all agree on where the water is at any moment. */
+function waveH(x, t, sc){
+  sc = sc || 1;
+  return sc*( 14.0*Math.sin(x*0.011/sc + t*0.50*sc)
+            + 6.5*Math.sin(x*0.024/sc - t*0.80*sc + 1.3)
+            + 3.0*Math.sin(x*0.047/sc + t*1.25*sc + 2.7));
+}
+function waveSlope(x, t, sc){
+  sc = sc || 1;
+  return sc*( 14.0*(0.011/sc)*Math.cos(x*0.011/sc + t*0.50*sc)
+            + 6.5*(0.024/sc)*Math.cos(x*0.024/sc - t*0.80*sc + 1.3)
+            + 3.0*(0.047/sc)*Math.cos(x*0.047/sc + t*1.25*sc + 2.7));
+}
+var SURF_Y = H*0.845;                 /* calm waterline at the raft */
+var WSTEP = 7;
+var _wvx = new Float32Array(160), _wvy = new Float32Array(160);
+function waveRow(yBase, sc, t){
+  var n=0, x;
+  for(x=-WSTEP; x<=W+WSTEP; x+=WSTEP){ _wvx[n]=x; _wvy[n]=yBase+waveH(x,t,sc); n++; }
+  return n;
+}
+function waveBand(yBase, sc, t, fill, rimA){
+  var n = waveRow(yBase, sc, t), i;
+  ctx.beginPath();
+  ctx.moveTo(_wvx[0], H+2);
+  for(i=0;i<n;i++) ctx.lineTo(_wvx[i], _wvy[i]);
+  ctx.lineTo(_wvx[n-1], H+2);
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+  /* the near edge of each swell: a soft dark under-curve, then a sunlit crest */
+  ctx.beginPath();
+  for(i=0;i<n;i++){ if(i===0) ctx.moveTo(_wvx[i], _wvy[i]+2.5); else ctx.lineTo(_wvx[i], _wvy[i]+2.5); }
+  ctx.strokeStyle = 'rgba(12,52,82,0.20)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.beginPath();
+  for(i=0;i<n;i++){ if(i===0) ctx.moveTo(_wvx[i], _wvy[i]); else ctx.lineTo(_wvx[i], _wvy[i]); }
+  ctx.strokeStyle = 'rgba(238,252,255,'+rimA+')'; ctx.lineWidth = 1.4; ctx.stroke();
+}
 function drawSea(){
+  var t = g.time;
   var grd = ctx.createLinearGradient(0,HY,0,H);
   grd.addColorStop(0,'#c6e7f2');
   grd.addColorStop(0.10,'#8ccde6');
@@ -2301,35 +2537,52 @@ function drawSea(){
   hz.addColorStop(0,'rgba(226,244,250,0.95)');
   hz.addColorStop(1,'rgba(226,244,250,0)');
   ctx.fillStyle=hz; ctx.fillRect(0,HY,W,48);
-  for(var i=0;i<44;i++){
-    var tt = i/44;
-    var gy = HY + 10 + Math.pow(tt,1.4)*(H*0.72-HY);
-    var spread = 6 + tt*42;
-    var gx = SUNX + Math.sin(g.time*2.2 + i*1.9)*spread;
-    ctx.globalAlpha = (1-tt)*0.55*(0.5+0.5*Math.sin(g.time*3+i));
+  /* sun glitter rides the swells instead of floating on a flat sheet */
+  for(var i=0;i<40;i++){
+    var tt = i/40;
+    var sc = 0.30 + tt*0.70;
+    var gy = HY + 8 + Math.pow(tt,1.4)*(SURF_Y-HY) + waveH(SUNX, t, sc);
+    var spread = 6 + tt*44;
+    var gx = SUNX + Math.sin(t*2.2 + i*1.9)*spread;
+    ctx.globalAlpha = (1-tt)*0.5*(0.5+0.5*Math.sin(t*3+i));
     px(gx, gy, 2+tt*4, 1+tt, '#fff6cf');
   }
   ctx.globalAlpha=1;
-  var rows = 15;
-  for(var r=0;r<rows;r++){
-    var tr = r/(rows-1);
-    var y = HY + Math.pow(tr,1.22)*(H-HY);
-    var amp = 2 + tr*5;
-    var speed = 12 + tr*80;
-    ctx.globalAlpha = 0.06 + tr*0.20; ctx.fillStyle = '#0d3f5c';
-    ctx.fillRect(0, y, W, 1 + tr*2);
-    ctx.globalAlpha = 0.50 - tr*0.28; ctx.fillStyle = '#e9fbff';
-    for(var x=-60; x<W+60; x+=46){
-      var off = (g.time*speed + r*37) % 46;
-      var wx = x - off;
-      var wy = y + Math.sin(wx*0.05 + g.time*1.4 + r)*amp*0.5;
-      ctx.fillRect(wx, wy, 10 + tr*26, 1 + Math.round(tr*1.5));
-    }
-    ctx.globalAlpha = 1;
+  /* three swells, far to near, each taller and faster than the last, so the
+     sea rolls toward the raft in layers rather than scrolling as wallpaper */
+  waveBand(HY + (SURF_Y-HY)*0.30, 0.34, t, 'rgba(214,242,252,0.10)', 0.24);
+  waveBand(HY + (SURF_Y-HY)*0.60, 0.60, t, 'rgba(120,200,228,0.13)', 0.38);
+  waveBand(SURF_Y, 1.0, t, 'rgba(28,108,150,0.24)', 0.62);
+  /* foam streaks ride the swell left-to-right, so the whole sea reads as
+     moving water between the rolling crests, not just at the waterline */
+  ctx.fillStyle='#f2feff';
+  for(var s2=0;s2<26;s2++){
+    var tr2 = (s2%7)/6;
+    var sc2 = 0.34 + tr2*0.66;
+    var yB = HY + (SURF_Y-HY)*(0.30 + tr2*0.70);
+    var span = W + 120;
+    var xx = ((s2*137 + t*(26 + tr2*46)) % span) - 60;
+    var yy = yB + waveH(xx, t, sc2);
+    ctx.globalAlpha = (0.10 + tr2*0.30) * (0.55 + 0.45*Math.sin(s2*2.3 + t*1.7));
+    ctx.fillRect(xx, yy, 6 + tr2*22, 1 + tr2*1.4);
   }
+  /* whitecaps: a burst of foam where the near surface stands up at a crest */
+  ctx.fillStyle='#f6ffff';
+  for(var fx=-10; fx<W+10; fx+=13){
+    var hh = waveH(fx, t, 1.0), sl = waveSlope(fx, t, 1.0);
+    if(hh > 13 && Math.abs(sl) < 0.16){
+      var k = Math.min(1,(hh-13)/8);
+      ctx.globalAlpha = 0.35 + 0.45*k;
+      ctx.fillRect(fx-6, SURF_Y+hh-2, 13, 2.4);
+      ctx.fillRect(fx+4, SURF_Y+hh-0.8, 7, 1.8);
+      ctx.beginPath(); ctx.ellipse(fx, SURF_Y+hh, 9, 2.4, 0, 0, Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.globalAlpha=1;
 }
 function drawWake(){
-  var baseY = H*1.005, topY = H*0.80;
+  var surf = SURF_Y + waveH(W/2, g.time, 1.0);
+  var topY = surf - 30, baseY = Math.min(H*1.005, surf + 62);
   ctx.save();
   var grd = ctx.createLinearGradient(0,topY,0,baseY);
   grd.addColorStop(0,'rgba(233,251,255,0.60)');
@@ -2409,6 +2662,46 @@ function drawIslandSil(x, baseY, wdt, kind, fog){
     px(x+wdt*0.02, baseY+1-h*0.80, 2, 5, ctx.fillStyle);
   }
 }
+/* the last shore is guarded: a kraken breaks the surface under the big land.
+   A domed body with rounded curling arms and two pale eyes reads as a creature
+   even at a distance; a fan of pointed strokes reads as rocks. Armed, it sits
+   lower in the water. */
+function drawKraken(x, baseY, wdt, armed, time){
+  var rear = armed ? 0.70 : 1;
+  var bW = wdt*0.30*rear, bH = wdt*0.17*rear;
+  var sw2 = Math.max(3, wdt*0.050);
+  ctx.save();
+  ctx.strokeStyle = '#123640';
+  ctx.fillStyle = '#123640';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = sw2;
+  var arms = [
+    {bx:-0.11, by:-0.02, cx:-0.34, cy:-0.10, ex:-0.44, ey: 0.05},
+    {bx:-0.06, by:-0.05, cx:-0.20, cy:-0.30, ex:-0.11, ey:-0.40},
+    {bx: 0.08, by:-0.04, cx: 0.30, cy:-0.22, ex: 0.41, ey:-0.01},
+    {bx: 0.12, by:-0.01, cx: 0.36, cy:-0.05, ex: 0.46, ey: 0.11}
+  ];
+  for(var i=0;i<arms.length;i++){
+    var a = arms[i], sw = Math.sin(time*0.8 + i*1.2)*0.03;
+    ctx.beginPath();
+    ctx.moveTo(x + a.bx*wdt, baseY + a.by*wdt);
+    ctx.quadraticCurveTo(x + (a.cx+sw)*wdt, baseY + a.cy*wdt, x + (a.ex+sw)*wdt, baseY + a.ey*wdt);
+    ctx.stroke();
+  }
+  /* the rounded mantle, sitting in the water in front of the shore */
+  ctx.beginPath();
+  ctx.moveTo(x - bW/2, baseY+2);
+  ctx.quadraticCurveTo(x - bW*0.55, baseY - bH*1.5, x, baseY - bH);
+  ctx.quadraticCurveTo(x + bW*0.55, baseY - bH*1.5, x + bW/2, baseY+2);
+  ctx.closePath();
+  ctx.fill();
+  /* two pale eyes: what makes the silhouette read as alive, not a rock */
+  ctx.fillStyle = '#ffe6a0';
+  var er = Math.max(1.1, wdt*0.011);
+  ctx.beginPath(); ctx.arc(x - bW*0.16, baseY - bH*0.92, er, 0, 6.3); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + bW*0.16, baseY - bH*0.92, er, 0, 6.3); ctx.fill();
+  ctx.restore();
+}
 function drawRifts(){
   var list = g.rifts.slice().sort((a,b)=> b.d - a.d);
   for(var i=0;i<list.length;i++){
@@ -2433,6 +2726,16 @@ function drawRifts(){
 function sideSpriteFor(t){
   if(typeof ISLE_SIDE_IMG==='undefined' || !t) return null;
   return ISLE_SIDE_IMG[t.artId] || null;
+}
+/* the bearing to an island is measured from the RAFT, not from the home
+   island. On a world-fixed chart the target stays put, so the screen angle
+   has to follow the raft or the island is drawn off in the wrong quarter
+   and the raft seems to swim away from it. */
+function targetBearing(t){
+  if(!t) return g.heading;
+  var dx = t.wx - g.raft.x, dy = t.wy - g.raft.y;
+  if(Math.abs(dx) + Math.abs(dy) < 1e-6) return g.heading;
+  return Math.atan2(dx, dy)/1.15;
 }
 function drawSideSprite(img, x, baseY, wdt, fog){
   var h = wdt * (img.h/img.w);
@@ -2459,7 +2762,7 @@ function drawSideSprite(img, x, baseY, wdt, fog){
 function drawTargetIsland(){
   var t = g.targets[g.target];
   if(!t) return;
-  var x = projX(t.lane, t.dist);
+  var x = projX(targetBearing(t), t.dist);
   var y = projY(t.dist);
   var wdt = (t.big?210:130) * projScale(t.dist);
   if(x > -300 && x < W+300){
@@ -2477,17 +2780,21 @@ function drawTargetIsland(){
     } else {
       drawIslandSil(x, y, wdt, t.big, fog);
     }
+    if(t.big) drawKraken(x, y, wdt, g.armed, g.time);
   }
 }
 
 /* ---- the raft (the hero) ---- */
 function drawRaft(){
-  var cx = W/2;
-  var bob = Math.sin(g.time*2.2)*1.5;
-  var deckY = H*0.80 + bob;
+  var cx = W/2, t = g.time;
+  /* buoyancy: the hull sits on the near swell and pitches with its slope, so
+     the raft answers the water instead of bobbing on a fixed sine */
+  var surf = SURF_Y + waveH(cx, t, 1.0);
+  var deckY = surf - 22;
+  var tilt = clamp(-waveSlope(cx, t, 1.0)*0.24, -0.13, 0.13) + clamp(g.heading,-1,1)*0.03;
   ctx.save();
   ctx.translate(cx, deckY);
-  ctx.rotate(g.heading*0.05);
+  ctx.rotate(tilt);
 
   ctx.globalAlpha = 0.30; ctx.fillStyle = '#0e3550';
   ctx.beginPath(); ctx.ellipse(0, 30, 56, 12, 0, 0, Math.PI*2); ctx.fill();
@@ -2568,9 +2875,16 @@ function drawRaft(){
   ctx.fillStyle='#7a5330'; ctx.fillRect(41,-4,7,2);
 
   ctx.restore();
+  /* foam collar where the hull meets the swell, so the raft sits IN the
+     water instead of hovering over it */
+  ctx.globalAlpha = 0.50; ctx.fillStyle = '#eefaff';
+  ctx.beginPath(); ctx.ellipse(cx, surf+2, 52, 7, 0, 0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 0.22;
+  ctx.beginPath(); ctx.ellipse(cx, surf+4, 68, 11, 0, 0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 1;
 }
 function drawTail(){
-  var cx = W/2, base = H*1.005;
+  var cx = W/2, base = Math.min(H*1.005, SURF_Y + waveH(cx, g.time, 1.0) + 46);
   ctx.globalAlpha=0.30; ctx.fillStyle='#173a52';
   ctx.beginPath();
   ctx.moveTo(cx-32, base); ctx.lineTo(cx-8, base-22);
@@ -2624,7 +2938,7 @@ function drawHUD(){
   bar(46,68,190,g.water/140,'#6fb6ff','WATER '+Math.round(g.water));
   bar(46,102,190,g.integrity/100,'#f0836a','RAFT '+Math.round(g.integrity));
   ctx.fillStyle='#ffffff'; ctx.font='12px ui-monospace,monospace';
-  ctx.fillText('LEGS '+g.legs+(g.materials?('   MAT '+g.materials):'')+(g.towers?('   TOWERS '+g.towers):''), 46, 128);
+  ctx.fillText('LEGS '+g.legs+(g.materials?('   LUMBER '+g.materials):'')+(g.towers?('   TOWERS '+g.towers):'')+(g.armed?'   ARMED':''), 46, 128);
   ctx.fillStyle='#f2f8ff'; ctx.font='13px ui-monospace,monospace';
   ctx.fillText(g.msg, 14, H-18);
 }
@@ -2646,12 +2960,17 @@ function drawSail(){
 }
 
 /* ---- chart ---- */
-var CHART_C = { x:W/2, y:H*0.78, R:Math.min(W,H)*0.60 };
+var CHART_C = { x:W/2, y:H*0.88, R:Math.min(W,H)*0.60 };
+var CHART_SC = 0.235;   // world units -> design px at zoom 1
 var CHART_BTNS = { back: {x:W-182, y:8, w:172, h:52, label:'BACK ASHORE', sub:''} };
-function chartPos(lane, dist){
-  var ang = lane*1.15;
-  var r = (dist/DMAX) * CHART_C.R;
-  return { x: CHART_C.x + Math.sin(ang)*r, y: CHART_C.y - Math.cos(ang)*r };
+function chartPos(wx, wy){
+  return { x: CHART_C.x + wx*CHART_SC, y: CHART_C.y - wy*CHART_SC };
+}
+/* a short, readable supply tag for the chart: how many groves, springs
+   and lumber an island holds. */
+function supplyTag(sup){
+  if(!sup) return '';
+  return 'G'+sup.forage+' S'+sup.water+' R'+sup.timber;
 }
 function drawCompass(x,y){
   ctx.save();
@@ -2672,7 +2991,11 @@ function drawChartBg(){
   grd.addColorStop(0,'#0d3a57'); grd.addColorStop(1,'#0a2c44');
   ctx.fillStyle=grd; ctx.fillRect(0,0,W,H);
 }
+var CHART_LABELS = [];
+var ISLE_LABELS = [];
+var ISLE_LABEL_BOXES = [];
 function drawChartWorld(){
+  CHART_LABELS.length = 0;
   ctx.strokeStyle='rgba(90,150,180,0.10)'; ctx.lineWidth=1;
   for(var yy=18; yy<H; yy+=34){
     ctx.beginPath();
@@ -2683,28 +3006,25 @@ function drawChartWorld(){
     ctx.stroke();
   }
   drawCompass(52, H*0.26);
+  var rp = chartPos(g.raft.x, g.raft.y);
   var reach = reachOf(g);
-  var rr2 = (reach/DMAX) * CHART_C.R;
+  var rr2 = reach*CHART_SC;
   ctx.strokeStyle='#63d6a0'; ctx.setLineDash([5,5]); ctx.lineWidth=1;
-  ctx.beginPath(); ctx.arc(CHART_C.x, CHART_C.y, Math.max(6,rr2), Math.PI, 0); ctx.stroke();
+  ctx.beginPath(); ctx.arc(rp.x, rp.y, Math.max(6,rr2), 0, Math.PI*2); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.globalAlpha=0.12; ctx.fillStyle='#63d6a0';
-  ctx.beginPath(); ctx.arc(CHART_C.x, CHART_C.y, Math.max(6,rr2), Math.PI, 0); ctx.fill();
+  ctx.globalAlpha=0.10; ctx.fillStyle='#63d6a0';
+  ctx.beginPath(); ctx.arc(rp.x, rp.y, Math.max(6,rr2), 0, Math.PI*2); ctx.fill();
   ctx.globalAlpha=1;
-  ctx.fillStyle='#eef4ff'; px(CHART_C.x-5, CHART_C.y-5, 10, 10, '#eef4ff');
-  ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.arc(CHART_C.x, CHART_C.y, 9, 0, Math.PI*2); ctx.stroke();
   var shown = 0;
   for(var i=0;i<g.targets.length;i++){
     var t=g.targets[i];
     if(t.done || !t.revealed) continue;
     shown++;
-    var p=chartPos(t.lane, t.dist);
-    var within = t.dist <= reach;
+    var p=chartPos(t.wx, t.wy);
+    var dd = worldDist(g.raft.x, g.raft.y, t.wx, t.wy);
+    var within = dd <= reach;
     var col = t.big ? (within?'#ffd34d':'#c9ad5e') : (within?'#dff0ff':'#9fbed2');
     var pulse = 0.5 + 0.5*Math.sin(g.time*2.6 + i*1.9);
-    /* a breathing halo keeps the idle chart from reading as a still
-       image: every sighted island flickers, in reach ones brighter. */
     ctx.globalAlpha = (within ? 0.30 : 0.16) * (0.40 + 0.60*pulse);
     ctx.fillStyle = within ? '#63d6a0' : '#7fa0b6';
     ctx.beginPath(); ctx.arc(p.x, p.y, (t.big?16:11) + pulse*4.5, 0, Math.PI*2); ctx.fill();
@@ -2714,12 +3034,17 @@ function drawChartWorld(){
     ctx.fillStyle=col;
     ctx.beginPath(); ctx.arc(p.x, p.y, t.big?6:3.8, 0, Math.PI*2); ctx.fill();
     ctx.globalAlpha=1;
-    ctx.font='12px ui-monospace,monospace';
-    var lw = ctx.measureText(t.name).width;
-    ctx.globalAlpha=0.88; px(p.x-lw/2-4, p.y-24, lw+8, 16, '#04223a'); ctx.globalAlpha=1;
-    ctx.fillStyle = within ? '#ffffff' : '#cfe0ee';
-    ctx.fillText(t.name, p.x-lw/2, p.y-12);
+    // labels are collected and drawn later in SCREEN space, so zooming in
+    // does not blow the text up until the islands' names collide.
+    CHART_LABELS.push({ x:p.x, y:p.y, name:t.name, tag:(t.big ? '' : supplyTag(t.sup)),
+                        within:within });
   }
+  // the raft: the one thing that moves on a world-fixed chart
+  ctx.fillStyle='#eef4ff'; px(rp.x-5, rp.y-5, 10, 10, '#eef4ff');
+  ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.arc(rp.x, rp.y, 9, 0, Math.PI*2); ctx.stroke();
+  ctx.font='9px ui-monospace,monospace'; ctx.fillStyle='#bfe9ff';
+  ctx.fillText('RAFT', rp.x-13, rp.y+22);
   g._chartShown = shown;
 }
 function drawChartChrome(){
@@ -2728,6 +3053,8 @@ function drawChartChrome(){
   ctx.fillText('CHART  reach '+Math.round(reachOf(g))+'u', 14, 26);
   ctx.fillStyle='#bfe0f2'; ctx.font='12px ui-monospace,monospace';
   ctx.fillText('towers sighted: '+g.towers, 14, 46);
+  ctx.fillStyle='#9fd0e8'; ctx.font='11px ui-monospace,monospace';
+  ctx.fillText('G groves  S springs  R lumber', 14, 64);
   ctx.fillStyle='#f2f8ff'; ctx.font='13px ui-monospace,monospace';
   ctx.fillText(g.msg, 14, H-14);
   ctx.fillStyle='#d7e8f4'; ctx.font='11px ui-monospace,monospace';
@@ -2738,17 +3065,39 @@ function drawChartChrome(){
     drawBtn(bb, true);
   }
 }
+function drawChartLabels(){
+  for(var i=0;i<CHART_LABELS.length;i++){
+    var L = CHART_LABELS[i];
+    var x = L.x*VIEW.z + VIEW.x, y = L.y*VIEW.z + VIEW.y;
+    if(x < -46 || x > W+46 || y < -22 || y > H+22) continue;
+    ctx.font='10px ui-monospace,monospace';
+    var lw = ctx.measureText(L.name).width;
+    ctx.globalAlpha=0.88; px(x-lw/2-4, y-25, lw+8, 14, '#04223a'); ctx.globalAlpha=1;
+    ctx.fillStyle = L.within ? '#ffffff' : '#cfe0ee';
+    ctx.fillText(L.name, x-lw/2, y-15);
+    if(L.tag){
+      ctx.font='8px ui-monospace,monospace';
+      var sw = ctx.measureText(L.tag).width;
+      ctx.globalAlpha=0.82; px(x-sw/2-3, y+6, sw+6, 11, '#04223a'); ctx.globalAlpha=1;
+      ctx.fillStyle = L.within ? '#bfe9d4' : '#8fb3c6';
+      ctx.fillText(L.tag, x-sw/2, y+14);
+    }
+  }
+}
 function drawChart(){
   drawChartBg();
   ctx.save(); applyWorld(); drawChartWorld(); ctx.restore();
+  drawChartLabels();
   drawChartChrome();
 }
 
 /* ---- island: a place you walk, one action per move ---- */
 var ISLE_BTNS = {
-  day:   {x:8,   y:H-80, w:110, h:54, label:'NEXT DAY', sub:''},
-  gather:{x:125, y:H-80, w:110, h:54, label:'GATHER', sub:''},
-  sail:  {x:242, y:H-80, w:110, h:54, label:'SET SAIL', sub:''}
+  day:   {x:8,   y:H-80, w:64, h:54, label:'NEXT', sub:'day'},
+  gather:{x:78,  y:H-80, w:64, h:54, label:'GATHER', sub:''},
+  repair:{x:148, y:H-80, w:64, h:54, label:'REPAIR', sub:''},
+  arm:   {x:218, y:H-80, w:64, h:54, label:'ARM', sub:''},
+  sail:  {x:288, y:H-80, w:64, h:54, label:'SAIL', sub:''}
 };
 var ISLE_RECT = {x:10, y:104, w:W-20, h:Math.round((W-20)*740/1024)};
 function islePix(n){
@@ -2772,6 +3121,7 @@ function drawIslandBg(){
 }
 function drawIslandWorld(){
   var is = g.isle, gr = is?is.graph:null, at = is?is.at:0;
+  ISLE_LABELS.length = 0;
   var art = is ? ISLE_ART[is.artId] : null;
   var cx = ISLE_RECT.x + ISLE_RECT.w/2, cy = ISLE_RECT.y + ISLE_RECT.h/2;
   // a soft lagoon so the island sits in water, not on a flat panel
@@ -2795,12 +3145,22 @@ function drawIslandWorld(){
   }
   var canAct = is && is.actions > 0;
   if(gr){
+    // a dark underlay first, then the bright path on top, so the routes
+    // read clearly over any terrain (the top-down render can be dark).
+    for(i=0;i<gr.edges.length;i++){
+      var e0 = gr.edges[i];
+      var a0 = islePix(gr.nodes[e0[0]]), b0 = islePix(gr.nodes[e0[1]]);
+      var live0 = canAct && (e0[0]===at || e0[1]===at);
+      ctx.strokeStyle = 'rgba(4,26,40,0.85)';
+      ctx.lineWidth = live0 ? 4.6 : 3.2;
+      ctx.beginPath(); ctx.moveTo(a0.x, a0.y); ctx.lineTo(b0.x, b0.y); ctx.stroke();
+    }
     for(i=0;i<gr.edges.length;i++){
       var e = gr.edges[i];
       var a = islePix(gr.nodes[e[0]]), b = islePix(gr.nodes[e[1]]);
       var live = canAct && (e[0]===at || e[1]===at);
-      ctx.strokeStyle = live ? '#bfe9ff' : '#4f7f98';
-      ctx.lineWidth = live ? 2.4 : 1.2;
+      ctx.strokeStyle = live ? '#eaffff' : '#9fd8f5';
+      ctx.lineWidth = live ? 2.6 : 1.8;
       ctx.setLineDash(live ? [] : [3,4]);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
@@ -2828,6 +3188,8 @@ function drawIslandWorld(){
       if(n.seen) known++;
       if(!n.seen && !current){
         px(p.x-4, p.y-4, 8, 8, reachable ? '#9fd8ff' : '#3f8098');
+        ctx.strokeStyle = reachable ? '#eaffff' : '#a9cddd'; ctx.lineWidth = 1.4;
+        ctx.strokeRect(p.x-4.5, p.y-4.5, 9, 9);
         if(reachable){
           ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1.6;
           ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI*2); ctx.stroke();
@@ -2837,20 +3199,78 @@ function drawIslandWorld(){
       var col = current ? '#3dd68f' : kind.col;
       px(p.x-6, p.y-6, 12, 12, '#04223a');
       px(p.x-4, p.y-4, 8, 8, col);
+      // a bright edge so a node still reads when it sits on green terrain
+      ctx.strokeStyle = '#eaffff'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(p.x-6.5, p.y-6.5, 13, 13);
       if(reachable && !current){
         ctx.strokeStyle='#bfe9ff'; ctx.lineWidth=1.6;
         ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI*2); ctx.stroke();
       }
       var lbl = kind.label;
-      ctx.font = '11px ui-monospace,monospace';
-      var lw = ctx.measureText(lbl).width;
-      var lx = Math.round(p.x - lw/2), ly = Math.round(p.y - 10);
-      px(lx-4, ly-13, lw+8, 15, 'rgba(4,34,58,0.95)');
-      ctx.fillStyle = current ? '#ffffff' : kind.col;
-      ctx.fillText(lbl, lx, ly);
+      if((n.type==='forage'||n.type==='water'||n.type==='timber') && typeof n.stock==='number')
+        lbl += ' ' + n.stock;
+      // collected here, placed later in SCREEN space so a pinch-zoom does not
+      // scale the text up until neighbours collide
+      ISLE_LABELS.push({ x:p.x, y:p.y, text:lbl, col:(current?'#ffffff':kind.col),
+                         pr:(current?0:(reachable?1:2)) });
     }
   }
   g._isleKnown = known; g._isleTotal = total;
+}
+function drawIsleLabels(){
+  ctx.font = '11px ui-monospace,monospace';
+  ctx.textAlign = 'left';
+  var placed = [];
+  ISLE_LABEL_BOXES = [];
+  var order = ISLE_LABELS.slice().sort((a,b)=> a.pr - b.pr);
+  var dots = [];
+  for(var d=0; d<ISLE_LABELS.length; d++){
+    dots.push({ x: ISLE_LABELS[d].x*VIEW.z + VIEW.x, y: ISLE_LABELS[d].y*VIEW.z + VIEW.y });
+  }
+  for(var i=0;i<order.length;i++){
+    var L = order[i];
+    var sx = L.x*VIEW.z + VIEW.x, sy = L.y*VIEW.z + VIEW.y;
+    var lw = Math.round(ctx.measureText(L.text).width) + 8, hh = 15;
+    // candidate boxes around the node, tried in preference order: above, below,
+    // then out to the sides and corners
+    var cand = [
+      { x: sx - lw/2,     y: sy - 23 },
+      { x: sx - lw/2,     y: sy + 8  },
+      { x: sx + 12,       y: sy - 7  },
+      { x: sx - 12 - lw,  y: sy - 7  },
+      { x: sx + 10,       y: sy - 23 },
+      { x: sx - 10 - lw,  y: sy - 23 },
+      { x: sx + 10,       y: sy + 8  },
+      { x: sx - 10 - lw,  y: sy + 8  }
+    ];
+    var best = 0, bestScore = Infinity;
+    for(var c=0;c<cand.length;c++){
+      var bx = cand[c].x, by = cand[c].y, sc = c*0.5; // tiny bias to earlier candidates
+      if(bx < 2) sc += (2-bx)*10;
+      if(bx+lw > W-2) sc += (bx+lw-(W-2))*10;
+      if(by < 2) sc += (2-by)*10;
+      if(by+hh > H-2) sc += (by+hh-(H-2))*10;
+      for(var q=0;q<placed.length;q++){
+        var o = placed[q];
+        var ox = Math.min(bx+lw, o.x+o.w+3) - Math.max(bx, o.x-3);
+        var oy = Math.min(by+hh, o.y+o.h+3) - Math.max(by, o.y-3);
+        if(ox>0 && oy>0) sc += ox*oy;
+      }
+      for(var k=0;k<dots.length;k++){
+        var dx = Math.min(bx+lw, dots[k].x+9) - Math.max(bx, dots[k].x-9);
+        var dy = Math.min(by+hh, dots[k].y+9) - Math.max(by, dots[k].y-9);
+        if(dx>0 && dy>0) sc += dx*dy;
+      }
+      if(sc < bestScore){ bestScore = sc; best = c; }
+      if(sc === 0) break;
+    }
+    var B = { x:Math.round(cand[best].x), y:Math.round(cand[best].y), w:lw, h:hh };
+    placed.push(B);
+    ISLE_LABEL_BOXES.push(B);
+    px(B.x, B.y, B.w, B.h, 'rgba(4,34,58,0.95)');
+    ctx.fillStyle = L.col;
+    ctx.fillText(L.text, B.x+4, B.y+12);
+  }
 }
 function drawIslandChrome(){
   var is = g.isle, gr = is?is.graph:null, at = is?is.at:0;
@@ -2875,7 +3295,7 @@ function drawIslandChrome(){
     if(on) px(88+a2*17, 70, 14, 4, '#b8f2c8');
   }
   ctx.fillStyle='#cfe6f2';
-  ctx.fillText('MAT '+g.materials+'   TOWERS '+g.towers, 190, 80);
+  ctx.fillText('LUMBER '+g.materials+'  TOWERS '+g.towers, 190, 80);
   ctx.fillStyle='#d7e8f4'; ctx.font='10px ui-monospace,monospace';
   ctx.fillText('tap a linked dot to walk (1 action)  ·  pinch to zoom', 12, 100);
 
@@ -2893,18 +3313,28 @@ function drawIslandChrome(){
   var noActs = !(is && is.actions>0);
   var atKind = (gr && gr.nodes[at]) ? gr.nodes[at].type : '';
   var canGather = !noActs && (atKind==='forage' || atKind==='water' || atKind==='timber');
-  var gatherWord = atKind==='forage' ? 'grove' : atKind==='water' ? 'spring' : atKind==='timber' ? 'rock' : '';
+  var gatherWord = atKind==='forage' ? 'grove' : atKind==='water' ? 'spring' : atKind==='timber' ? 'lumber' : '';
+  var atStock = (gr && gr.nodes[at] && typeof gr.nodes[at].stock==='number') ? (' ' + gr.nodes[at].stock) : '';
   var gbtn = {x:ISLE_BTNS.gather.x, y:ISLE_BTNS.gather.y, w:ISLE_BTNS.gather.w, h:ISLE_BTNS.gather.h,
-              label:'GATHER', sub: canGather ? gatherWord : (noActs ? 'no actions' : '')};
+              label:'GATHER', sub: canGather ? (gatherWord + atStock) : (noActs ? 'no actions' : '')};
   var sbtn = {x:ISLE_BTNS.sail.x, y:ISLE_BTNS.sail.y, w:ISLE_BTNS.sail.w, h:ISLE_BTNS.sail.h,
-              label:'SET SAIL', sub:'pick a heading'};
+              label:'SAIL', sub:'heading'};
+  var rbtn = {x:ISLE_BTNS.repair.x, y:ISLE_BTNS.repair.y, w:ISLE_BTNS.repair.w, h:ISLE_BTNS.repair.h,
+              label:'REPAIR', sub: g.integrity>=100 ? 'sound' : (g.materials>0 ? ('x'+g.materials) : 'no lumber')};
+  var canRepair = g.integrity<100 && g.materials>0;
+  var abtn = {x:ISLE_BTNS.arm.x, y:ISLE_BTNS.arm.y, w:ISLE_BTNS.arm.w, h:ISLE_BTNS.arm.h,
+              label:'ARM', sub: g.armed ? 'ready' : ('x'+g.materials+'/'+ARM_COST)};
+  var canArm = !g.armed && g.materials>=ARM_COST;
   drawBtn(ISLE_BTNS.day, noActs);
   drawBtn(gbtn, canGather);
+  drawBtn(rbtn, canRepair);
+  drawBtn(abtn, g.armed || canArm);
   drawBtn(sbtn, true);
 }
 function drawIslandPlace(){
   drawIslandBg();
   ctx.save(); applyWorld(); drawIslandWorld(); ctx.restore();
+  drawIsleLabels();
   drawIslandChrome();
 }
 function wrapText(s, maxc){
@@ -2919,19 +3349,24 @@ function wrapText(s, maxc){
   if(cur.length) lines.push(cur);
   return lines;
 }
+function fitFont(s, max, start){
+  var fs = start;
+  ctx.font = fs + 'px ui-monospace,monospace';
+  var w = ctx.measureText(s).width;
+  while(w > max && fs > 8){ fs--; ctx.font = fs + 'px ui-monospace,monospace'; w = ctx.measureText(s).width; }
+  return w;
+}
 function drawBtn(b, on){
   ctx.save();
   ctx.fillStyle='#04223a'; rr(b.x,b.y,b.w,b.h,8); ctx.fill();
   ctx.fillStyle = on ? '#1f6a92' : '#1b3a4d'; rr(b.x+2,b.y+2,b.w-4,b.h-4,6); ctx.fill();
   ctx.restore();
   ctx.fillStyle = on ? '#ffffff' : '#9fb8cc';
-  ctx.font = '14px ui-monospace,monospace';
-  var tw = ctx.measureText(b.label).width;
+  var tw = fitFont(b.label, b.w-16, 13);
   ctx.fillText(b.label, Math.round(b.x + (b.w-tw)/2), b.y + (b.sub? Math.round(b.h*0.44) : Math.round(b.h*0.62)));
   if(b.sub){
-    ctx.font='10px ui-monospace,monospace';
-    var sw = ctx.measureText(b.sub).width;
     ctx.fillStyle = on ? '#cfe6f2' : '#7b96a8';
+    var sw = fitFont(b.sub, b.w-16, 10);
     ctx.fillText(b.sub, Math.round(b.x+(b.w-sw)/2), b.y + b.h - 12);
   }
 }
@@ -2951,16 +3386,82 @@ function drawOver(){
   ctx.globalAlpha=0.5; ctx.fillStyle='#0a2434';
   rr(W/2-120, H*0.48, 240, 34, 8); ctx.fill();
   ctx.restore();
-  ctext('legs '+g.legs+'   towers '+g.towers+'   raft '+Math.round(g.integrity), H*0.505, '#ffffff', '13px ui-monospace,monospace');
-  ctext('tap or press ENTER to sail again', H*0.62, '#dceaf6', '13px ui-monospace,monospace');
+  ctext('legs '+g.legs+'   towers '+g.towers+'   raft '+Math.round(g.integrity)+(g.armed?'   armed':''), H*0.505, '#ffffff', '13px ui-monospace,monospace');
+  ctext('tap or press ENTER for the entry screen', H*0.62, '#dceaf6', '13px ui-monospace,monospace');
 }
 
+
+/* ---- entry screen + options ---- */
+var MENU_BTNS = {
+  play:    {x:70, y:H*0.54, w:220, h:62, label:'PLAY GAME', sub:'drift · land · reach the big land'},
+  options: {x:70, y:H*0.54+76, w:220, h:54, label:'OPTIONS', sub:'music & sound volume'}
+};
+var OPT_BTNS = { back: {x:W/2-90, y:H-96, w:180, h:50, label:'BACK', sub:''} };
+function optSliderY(i){ return H*0.44 + i*90; }
+function optSliderRect(i){ return {x:56, y:optSliderY(i)-6, w:W-112, h:12}; }
+function optRowAt(p){
+  for(var i=0;i<2;i++){ var y=optSliderY(i); if(p.y>=y-30 && p.y<=y+24 && p.x>=36 && p.x<=W-36) return i; }
+  return -1;
+}
+function setOptFromX(i, x){
+  var r=optSliderRect(i);
+  var v=Math.max(0, Math.min(1, (x-r.x)/r.w));
+  if(i===0) AU.vol.music=v; else AU.vol.sfx=v;
+  applyVolumes();
+}
+function startGame(){
+  var s = (Date.now()&0xffff) || 12345;
+  g = newGame(s);
+  g.scene='chart';
+  lastScene = null;
+  audioArm(); musicStart();
+  try{ primeIslandArt(); }catch(e){}
+  cue('heading');
+}
+/* death or a win lands back on the ENTRY screen, not a fresh run in place:
+   the player decides to play again. */
+function goMenu(){
+  g = newGame((Date.now()&0xffff) || 12345);
+  g.scene='menu';
+  lastScene = null;
+  cue('heading');
+  return g;
+}
+function drawMenu(){
+  drawSea();
+  ctx.save(); ctx.globalAlpha=0.42; px(0,0,W,H,'#04223a'); ctx.restore();
+  ctext('THE RAFT', H*0.30, '#eaf4ff', '34px ui-monospace,monospace');
+  ctext('drift to a silhouette, land, and reach the big land', H*0.355, '#9fd0e8', '11px ui-monospace,monospace');
+  drawBtn(MENU_BTNS.play, true);
+  drawBtn(MENU_BTNS.options, true);
+  ctext('alpha build', H-16, '#7fa0b6', '10px ui-monospace,monospace');
+}
+function drawOptions(){
+  drawSea();
+  ctx.save(); ctx.globalAlpha=0.55; px(0,0,W,H,'#04223a'); ctx.restore();
+  ctext('OPTIONS', H*0.22, '#eaf4ff', '26px ui-monospace,monospace');
+  var labels=['MUSIC','SOUND'], vals=[AU.vol.music, AU.vol.sfx];
+  for(var i=0;i<2;i++){
+    var y=optSliderY(i), r=optSliderRect(i);
+    ctx.fillStyle='#cfe6f2'; ctx.font='13px ui-monospace,monospace';
+    ctx.fillText(labels[i], r.x, y-20);
+    ctx.textAlign='right'; ctx.fillStyle='#eaf4ff';
+    ctx.fillText(Math.round(vals[i]*100)+'%', r.x+r.w, y-20);
+    ctx.textAlign='left';
+    px(r.x, r.y, r.w, r.h, '#123a52');
+    px(r.x, r.y, Math.round(r.w*vals[i]), r.h, '#3dd68f');
+    px(r.x+Math.round(r.w*vals[i])-5, r.y-6, 10, r.h+12, '#eaf4ff');
+  }
+  drawBtn(OPT_BTNS.back, true);
+}
 
 var lastScene = null;
 function render(){
   applyBase();
   if(g.scene!==lastScene){ resetView(); lastScene=g.scene; }
-  if(g.scene==='chart') drawChart();
+  if(g.scene==='menu') drawMenu();
+  else if(g.scene==='options') drawOptions();
+  else if(g.scene==='chart') drawChart();
   else if(g.scene==='sail') drawSail();
   else if(g.scene==='island') drawIslandPlace();
   else drawOver();
@@ -2985,7 +3486,7 @@ function evPos(e){
   return canvasPt(t.clientX, t.clientY);
 }
 function tDist(a,b){ var dx=a.clientX-b.clientX, dy=a.clientY-b.clientY; return Math.sqrt(dx*dx+dy*dy)||1; }
-var dragStart = null, dragMoved = 0, pinch = null;
+var dragStart = null, dragMoved = 0, pinch = null, sliderDrag = null;
 
 function onDown(e){
   e.preventDefault();
@@ -2998,6 +3499,10 @@ function onDown(e){
     return;
   }
   var p = evPos(e);
+  if(g.scene==='options'){
+    var si = optRowAt(p);
+    if(si>=0){ sliderDrag = si; setOptFromX(si, p.x); dragStart = null; return; }
+  }
   dragStart = p; dragMoved = 0;
   if(g.scene==='sail') g.dragging = true;
 }
@@ -3013,13 +3518,14 @@ function onMove(e){
     clampView();
     return;
   }
+  if(sliderDrag!==null){ e.preventDefault(); setOptFromX(sliderDrag, evPos(e).x); return; }
   if(!dragStart) return;
   e.preventDefault();
   var p = evPos(e);
   var dx = p.x - dragStart.x, dy = p.y - dragStart.y;
   dragMoved = Math.max(dragMoved, Math.abs(dx) + Math.abs(dy));
   if(g.scene==='sail' && Math.abs(dx) > 2){
-    g.heading = clamp(g.heading + dx*(1.6/W), -1, 1);
+    g.heading = wrapH(g.heading + dx*(1.6/W));
     dragStart.x = p.x;
   } else if(sceneIsMap() && VIEW.z > 1.001){
     VIEW.x += dx; VIEW.y += dy; clampView();
@@ -3030,17 +3536,27 @@ function pickChart(p){
   for(var i=0;i<g.targets.length;i++){
     var t=g.targets[i];
     if(t.done || !t.revealed) continue;
-    var c=chartPos(t.lane, t.dist);
+    var c=chartPos(t.wx, t.wy);
     if(Math.abs(p.x-c.x) < 26 && Math.abs(p.y-c.y) < 24){ chooseTarget(g, i); return true; }
   }
   return false;
 }
 function onUp(e){
+  if(sliderDrag!==null){ sliderDrag = null; dragStart = null; g.dragging = false; return; }
   if(pinch){ pinch = null; dragStart = null; g.dragging = false; g.steer = 0; return; }
   if(!dragStart) return;
   var p = dragStart; var moved = dragMoved;
   dragStart = null; g.dragging = false; g.steer = 0;
-  if(g.ended){ g = newGame((Date.now()&0xffff)); return; }
+  if(g.ended){ goMenu(); return; }
+  if(g.scene==='menu'){
+    if(hit(p, MENU_BTNS.play)) startGame();
+    else if(hit(p, MENU_BTNS.options)) g.scene='options';
+    return;
+  }
+  if(g.scene==='options'){
+    if(hit(p, OPT_BTNS.back)) g.scene='menu';
+    return;
+  }
   if(moved > 16) return;
   if(g.scene==='chart'){
     if(g.isle && hit(p, CHART_BTNS.back)){ returnToIsland(g); return; }
@@ -3049,6 +3565,8 @@ function onUp(e){
   if(g.scene==='island'){
     if(hit(p, ISLE_BTNS.day)){ endDay(g); return; }
     if(hit(p, ISLE_BTNS.gather)){ gatherHere(g); return; }
+    if(hit(p, ISLE_BTNS.repair)){ repairRaft(g); return; }
+    if(hit(p, ISLE_BTNS.arm)){ armRaft(g); return; }
     if(hit(p, ISLE_BTNS.sail)){ setSail(g); return; }
     var node = pickNode(toWorld(p));
     if(node!==null && node!==undefined){ moveTo(g, node); return; }
@@ -3075,7 +3593,7 @@ window.addEventListener('keydown', (e) => {
   KEYS[e.key]=true;
   if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A') g.steer = -1;
   if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') g.steer = 1;
-  if(e.key==='Enter'&&g.ended){ g=newGame((Date.now()&0xffff)); }
+  if(e.key==='Enter'&&g.ended){ goMenu(); }
 });
 window.addEventListener('keyup', (e) => {
   KEYS[e.key]=false;
@@ -3098,6 +3616,10 @@ window.__game = {
   isle: () => g.isle,
   moveTo: (idx) => moveTo(g, idx),
   gather: () => gatherHere(g),
+  repair: () => repairRaft(g),
+  arm: () => armRaft(g),
+  armed: () => !!g.armed,
+  integrity: () => g.integrity,
   setSail: () => setSail(g),
   backAshore: () => returnToIsland(g),
   node: () => g.isle && g.isle.at,
@@ -3118,7 +3640,17 @@ window.__game = {
   endDay: () => endDay(g),
   leaveIsland: () => leaveIsland(g),
   integrity: () => g.integrity,
-  chartPos: (l,d) => chartPos(l,d),
+  chartPos: (wx,wy) => chartPos(wx,wy),
+  start: () => { startGame(); return g; },
+  sceneSet: (s) => { g.scene=s; lastScene=null; return g.scene; },
+  vol: (v) => { if(v){ if(v.music!==undefined) AU.vol.music=v.music; if(v.sfx!==undefined) AU.vol.sfx=v.sfx; applyVolumes(); } return {music:AU.vol.music, sfx:AU.vol.sfx}; },
+  raft: () => ({x:g.raft.x, y:g.raft.y}),
+  targetBearing: () => targetBearing(g.targets[g.target]),
+  projX: (lane, d) => projX(lane, d),
+  goMenu: () => goMenu(),
+  supply: (i) => g.targets[i] && g.targets[i].sup,
+  nodeStock: () => g.isle && g.isle.graph.nodes.map(n=> (typeof n.stock==='number'? n.stock : null)),
+  isleLabelBoxes: () => ISLE_LABEL_BOXES,
   pickChart: (x,y) => pickChart({x:x,y:y}),
   view: () => ({z:VIEW.z, x:VIEW.x, y:VIEW.y}),
   setView: (z,x,y) => { VIEW.z=z; VIEW.x=x; VIEW.y=y; clampView(); return {z:VIEW.z, x:VIEW.x, y:VIEW.y}; },

@@ -101,8 +101,7 @@ function genIslandRGBA(o){
     for(var gx=0; gx<GW; gx++){
       var pxs = Math.min(W-1, Math.round(gx*(W-1)/(GW-1)));
       var pys = Math.min(H-1, Math.round(gy*(H-1)/(GH-1)));
-      var hi = pys*W+pxs;
-      grid[gy*GW+gx] = (height[hi] > sea && biome[hi] !== GEN.BIOME.SNOW) ? 1 : 0;
+      grid[gy*GW+gx] = height[pys*W+pxs] > sea ? 1 : 0;
     }
   }
   return { topdown:{ data:top, w:W, h:H }, side:side, land:{ grid:grid, gw:GW, gh:GH } };
@@ -274,6 +273,15 @@ def main():
     old = "  ctx.drawImage(img, x - wdt/2, base - h, wdt, h);"
     new = "  ctx.drawImage(img.cv, x - wdt/2, base - h, wdt, h);"
     if old not in html: raise SystemExit("drawSideSprite main not found")
+    html = html.replace(old, new, 1)
+    # 5b) the caller still tested it like an <img>. side sprites are now
+    # canvas objects, which have no .complete/.naturalWidth, so the guard
+    # was ALWAYS false and every island fell back to the polygon. v17 bug.
+    old = ("    if(spr && spr.complete && spr.naturalWidth){\n"
+           "      drawSideSprite(spr, x, y, wdt, fog);")
+    new = ("    if(spr && spr.cv && spr.cv.width){\n"
+           "      drawSideSprite(spr, x, y, wdt, fog);")
+    if old not in html: raise SystemExit("drawTargetIsland side guard not found")
     html = html.replace(old, new, 1)
 
     # 6) drawIslandWorld: canvas object
