@@ -395,7 +395,7 @@ func draw_island_scene() -> void:
 		for x in range(grid["w"]):
 			if grid["map"][y][x] == 1:
 				rect(x * ts, y * ts, ts, ts, tile_color(1, x, y))
-				var edge := (x > 0 and grid["map"][y][x - 1] == 0) \
+				var edge: bool = (x > 0 and grid["map"][y][x - 1] == 0) \
 					or (x < grid["w"] - 1 and grid["map"][y][x + 1] == 0) \
 					or (y > 0 and grid["map"][y - 1][x] == 0) \
 					or (y < grid["h"] - 1 and grid["map"][y + 1][x] == 0)

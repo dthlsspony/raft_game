@@ -56,8 +56,12 @@ Scenes: `menu`, `options`, `chart`, `sail`, `island`, `over`, `win`.
   https://public.ilands.ai/agent-bundles/356421748284985344/28138f85a4fae618207dd6091fbc51280ed2f2f6088721f5bb240e3d96090ae3/index.html
   sha256 `7cd652cf…` (verified byte-identical to `prototype/index.html`).
 - `prototype/index.html` — the feel-test, plain HTML5 canvas, runs in any browser.
-- `godot/` — a Godot 4 project, whole slice drawn in code. **Not yet run inside
-  the editor** (no Godot where it was written); treat it as a first cut.
+- `godot/` — a Godot 4 project, whole slice drawn in code (the older side-on
+  keyboard build). Headless-verified 2026-10-08: loads and runs clean — no
+  parse or runtime errors over 240 frames on 4.7.2 and 4.5.1. The first cut had
+  one parse error at `draw_island_scene` (`var edge :=` on a multi-line boolean,
+  an inferred type that never resolved), now typed `var edge: bool`. Not yet
+  opened in the editor GUI; still a first cut.
 - Repo: github.com/dthlsspony/raft_game.
 
 ### Build history (condensed)
